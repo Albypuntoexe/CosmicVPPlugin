@@ -1,0 +1,7 @@
+<plugin
+        id="com.cosmic.vpplugin"
+        name="Cosmic AI Estimation Tool"
+        description="Plugin per l'integrazione di LLM e il calcolo dinamico dei Function Point COSMIC"
+        provider="Alberto"
+        class="com.cosmic.vpplugin.CosmicPlugin">
+</plugin>
