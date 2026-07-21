@@ -5,7 +5,7 @@ import com.vp.plugin.ApplicationManager;
 import com.vp.plugin.VPPlugin;
 import com.vp.plugin.VPPluginInfo;
 
-import java.awt.Frame;
+import java.awt.Component;
 import java.awt.dnd.DropTarget;
 
 /**
@@ -38,8 +38,10 @@ public class CosmicPlugin implements VPPlugin {
 
     @Override
     public void loaded(VPPluginInfo info) {
-        Frame rootFrame = ApplicationManager.instance().getViewManager().getRootFrame();
+        Component rootFrame = ApplicationManager.instance().getViewManager().getRootFrame();
 
+        // DropTarget accepts any java.awt.Component (Frame is-a Component in practice,
+        // but getRootFrame() is declared to return Component, not Frame).
         dropTarget = new DropTarget(rootFrame, new CosmicDropTargetListener());
         rootFrame.setDropTarget(dropTarget);
 
