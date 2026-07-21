@@ -6,10 +6,32 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Converte la struttura generica prodotta da {@link MiniJsonParser}
+ * Convert la struttura generica prodotta da {@link MiniJsonParser}
  * (Map/List/String/Double/Boolean/null) nei POJO tipizzati di
- * {@link CosmicJsonModel}, cosi' che il resto del plugin non debba mai
- * manipolare direttamente Map/List "grezze".
+ * {@link CosmicJsonModel}.
+ *
+ * FIX (bug segnalato: <<include>>/<<extend>> mai generate):
+ * la versione precedente leggeva "includesIds" ed "extendsList" SOLO se
+ * annidati dentro un oggetto "relations": { "includes": [...], "extends":
+ * [...] }. Il JSON realmente in uso li espone invece come chiavi dirette
+ * dell'oggetto useCase:
+ *
+ *   "includesIds": ["UC2"],
+ *   "extendsList": [ { "targetId": "UC1", "extensionPoint": "..." } ]
+ *
+ * Con la struttura precedente, u.get("relations") restituiva null, il blocco
+ * di lettura non veniva mai eseguito, e le liste rimanevano vuote
+ * (inizializzate ma non popolate: nessuna NullPointerException, ma nessun
+ * dato — per questo il bug era "silenzioso"). Ora si legge prima la forma
+ * piatta (quella corrente); se assente, si tenta come fallback la vecchia
+ * forma annidata, per non rompere eventuali JSON di test gia' scritti con lo
+ * schema precedente.
+ *
+ * Ho anche irrobustito {@link #asMap(Object)} e {@link #list(Object)}: prima
+ * facevano un cast diretto assumendo il tipo corretto (rischio di
+ * ClassCastException silenziosa se un campo del JSON non e' del tipo
+ * atteso); ora controllano il tipo con {@code instanceof} e restituiscono
+ * rispettivamente {@code null}/lista vuota in ogni altro caso.
  */
 public final class CosmicJsonMapper {
 
@@ -23,6 +45,7 @@ public final class CosmicJsonMapper {
 
         for (Object rawActor : list(root.get("actors"))) {
             Map<String, Object> a = asMap(rawActor);
+            if (a == null) continue;
             CosmicJsonModel.Actor actor = new CosmicJsonModel.Actor();
             actor.id = str(a.get("id"), null);
             actor.name = str(a.get("name"), "Attore");
@@ -32,6 +55,8 @@ public final class CosmicJsonMapper {
 
         for (Object rawUc : list(root.get("useCases"))) {
             Map<String, Object> u = asMap(rawUc);
+            if (u == null) continue;
+
             CosmicJsonModel.UseCase uc = new CosmicJsonModel.UseCase();
             uc.id = str(u.get("id"), null);
             uc.name = str(u.get("name"), "Use Case");
@@ -45,28 +70,47 @@ public final class CosmicJsonMapper {
                 uc.exceptions.add(String.valueOf(s));
             }
 
-            Map<String, Object> relations = asMap(u.get("relations"));
-            if (relations != null) {
-                for (Object inc : list(relations.get("includes"))) {
+            // ---- includesIds: prima la forma piatta (attuale), poi fallback annidato ----
+            List<Object> includesRaw = list(u.get("includesIds"));
+            if (includesRaw.isEmpty()) {
+                Map<String, Object> relations = asMap(u.get("relations"));
+                if (relations != null) {
+                    includesRaw = list(relations.get("includes"));
+                }
+            }
+            for (Object inc : includesRaw) {
+                if (inc != null) {
                     uc.includesIds.add(String.valueOf(inc));
                 }
-                for (Object rawExt : list(relations.get("extends"))) {
-                    Map<String, Object> e = asMap(rawExt);
-                    CosmicJsonModel.ExtendRelation ext = new CosmicJsonModel.ExtendRelation();
-                    ext.targetId = str(e.get("targetId"), null);
-                    ext.extensionPoint = str(e.get("extensionPoint"), "");
-                    uc.extendsList.add(ext);
+            }
+
+            // ---- extendsList: prima la forma piatta (attuale), poi fallback annidato ----
+            List<Object> extendsRaw = list(u.get("extendsList"));
+            if (extendsRaw.isEmpty()) {
+                Map<String, Object> relations = asMap(u.get("relations"));
+                if (relations != null) {
+                    extendsRaw = list(relations.get("extends"));
                 }
+            }
+            for (Object rawExt : extendsRaw) {
+                Map<String, Object> e = asMap(rawExt);
+                if (e == null) continue;
+                CosmicJsonModel.ExtendRelation ext = new CosmicJsonModel.ExtendRelation();
+                ext.targetId = str(e.get("targetId"), null);
+                ext.extensionPoint = str(e.get("extensionPoint"), "");
+                uc.extendsList.add(ext);
             }
 
             for (Object rawFp : list(u.get("functionalProcesses"))) {
                 Map<String, Object> f = asMap(rawFp);
+                if (f == null) continue;
                 CosmicJsonModel.FunctionalProcess fp = new CosmicJsonModel.FunctionalProcess();
                 fp.fpId = str(f.get("fpId"), null);
                 fp.fpName = str(f.get("fpName"), "");
                 fp.triggeringEvent = str(f.get("triggeringEvent"), "");
                 for (Object rawSp : list(f.get("subProcesses"))) {
                     Map<String, Object> sp = asMap(rawSp);
+                    if (sp == null) continue;
                     CosmicJsonModel.SubProcess sub = new CosmicJsonModel.SubProcess();
                     sub.step = (int) num(sp.get("step"), 0);
                     sub.description = str(sp.get("description"), "");
@@ -89,12 +133,12 @@ public final class CosmicJsonMapper {
 
     @SuppressWarnings("unchecked")
     private static Map<String, Object> asMap(Object o) {
-        return o == null ? null : (Map<String, Object>) o;
+        return (o instanceof Map) ? (Map<String, Object>) o : null;
     }
 
     @SuppressWarnings("unchecked")
     private static List<Object> list(Object o) {
-        return o == null ? java.util.Collections.emptyList() : (List<Object>) o;
+        return (o instanceof List) ? (List<Object>) o : java.util.Collections.emptyList();
     }
 
     private static String str(Object o, String fallback) {
@@ -102,6 +146,6 @@ public final class CosmicJsonMapper {
     }
 
     private static double num(Object o, double fallback) {
-        return o instanceof Double ? (Double) o : fallback;
+        return (o instanceof Double) ? (Double) o : fallback;
     }
 }

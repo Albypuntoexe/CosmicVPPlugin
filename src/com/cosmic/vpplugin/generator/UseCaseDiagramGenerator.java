@@ -241,10 +241,24 @@ public final class UseCaseDiagramGenerator {
             IUseCaseUIModel baseShape = useCaseShapes.get(ucDto.id);
             if (baseModel == null) continue;
 
+            if (ucDto.includesIds.isEmpty()) {
+                continue; // nessuna relazione include da tracciare per questo UC
+            }
+
             for (String includedId : ucDto.includesIds) {
+                ApplicationManager.instance().getViewManager().showMessage(
+                        "[COSMIC AI][DEBUG] Tentativo <<include>> da '" + ucDto.id
+                                + "' verso '" + includedId + "'...");
+
                 IUseCase includedModel = useCaseElements.get(includedId);
                 IUseCaseUIModel includedShape = useCaseShapes.get(includedId);
-                if (includedModel == null || includedShape == null) continue;
+                if (includedModel == null || includedShape == null) {
+                    ApplicationManager.instance().getViewManager().showMessage(
+                            "[COSMIC AI][DEBUG] SALTATO: '" + includedId
+                                    + "' non trovato tra gli Use Case disegnati "
+                                    + "(controlla che l'id combaci esattamente con lo 'id' di un altro useCase nel JSON).");
+                    continue;
+                }
 
                 // Nel modello COSMIC/UML la freccia <<include>> parte dal
                 // base use case verso lo use case incluso.
@@ -254,6 +268,9 @@ public final class UseCaseDiagramGenerator {
 
                 diagramManager.createConnector(
                         diagram, includeModel, (IDiagramElement) baseShape, (IDiagramElement) includedShape, null);
+
+                ApplicationManager.instance().getViewManager().showMessage(
+                        "[COSMIC AI][DEBUG] <<include>> da '" + ucDto.id + "' a '" + includedId + "' -> Fatto.");
             }
         }
     }
@@ -270,10 +287,24 @@ public final class UseCaseDiagramGenerator {
             IUseCaseUIModel extensionShape = useCaseShapes.get(ucDto.id);
             if (extensionModel == null) continue;
 
+            if (ucDto.extendsList.isEmpty()) {
+                continue; // nessuna relazione extend da tracciare per questo UC
+            }
+
             for (ExtendRelation ext : ucDto.extendsList) {
+                ApplicationManager.instance().getViewManager().showMessage(
+                        "[COSMIC AI][DEBUG] Tentativo <<extend>> da '" + ucDto.id
+                                + "' verso '" + ext.targetId + "' (extension point: '" + ext.extensionPoint + "')...");
+
                 IUseCase baseModel = useCaseElements.get(ext.targetId);
                 IUseCaseUIModel baseShape = useCaseShapes.get(ext.targetId);
-                if (baseModel == null || baseShape == null) continue;
+                if (baseModel == null || baseShape == null) {
+                    ApplicationManager.instance().getViewManager().showMessage(
+                            "[COSMIC AI][DEBUG] SALTATO: targetId '" + ext.targetId
+                                    + "' non trovato tra gli Use Case disegnati "
+                                    + "(controlla che l'id combaci esattamente con lo 'id' di un altro useCase nel JSON).");
+                    continue;
+                }
 
                 // La freccia <<extend>> parte dallo use case "estensione"
                 // verso lo use case "base".
@@ -289,6 +320,9 @@ public final class UseCaseDiagramGenerator {
 
                 diagramManager.createConnector(
                         diagram, extendModel, (IDiagramElement) extensionShape, (IDiagramElement) baseShape, null);
+
+                ApplicationManager.instance().getViewManager().showMessage(
+                        "[COSMIC AI][DEBUG] <<extend>> da '" + ucDto.id + "' a '" + ext.targetId + "' -> Fatto.");
             }
         }
     }
