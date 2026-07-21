@@ -4,4 +4,18 @@
         description="Plugin per l'integrazione di LLM e il calcolo dinamico dei Function Point COSMIC"
         provider="Alberto"
         class="com.cosmic.vpplugin.CosmicPlugin">
+
+    <actionSets>
+        <actionSet id="com.cosmic.vpplugin.actions.MainActionSet">
+            <action
+                    id="com.cosmic.vpplugin.actions.OpenAnalyzerPane"
+                    actionType="generalAction"
+                    label="COSMIC AI Analyzer..."
+                    tooltip="Apri il pannello COSMIC AI per l'import dei requisiti e la generazione del diagramma"
+                    menuPath="Tools">
+                <actionController class="com.cosmic.vpplugin.action.CosmicOpenPanelActionController"/>
+            </action>
+        </actionSet>
+    </actionSets>
+
 </plugin>
