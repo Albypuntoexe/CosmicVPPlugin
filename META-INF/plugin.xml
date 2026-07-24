@@ -1,33 +1,57 @@
 <plugin
-        id="com.cosmic.vpplugin.v2"
-        name="Cosmic AI V2"
-        description="Plugin per l'integrazione di LLM..."
+        id="com.cosmic.vpplugin"
+        name="Cosmic AI Estimation Tool"
+        description="Plugin per l'integrazione di LLM e il calcolo dinamico dei Function Point COSMIC"
         provider="Alberto"
         class="com.cosmic.vpplugin.CosmicPlugin">
 
     <actionSets>
-        <!-- 1) Azione per la Ribbon / Sleek UI Nativa (Tab: Plug-ins -> Gruppo: Cosmic AI) -->
+
+        <!--
+            VIA 1 - Menu "Tools" + toolbar dedicata (pattern ufficiale documentato
+            nel tutorial Visual Paradigm "How to Develop Visual Paradigm Plug-in?").
+            index="new" forza una NUOVA riga di toolbar (piu' visibile di
+            un'icona persa in una riga esistente). Best-effort per la resa
+            esatta sotto interfaccia Sleek: non ho trovato documentazione
+            ufficiale che garantisca in quale tab/ribbon Sleek raggruppi i
+            toolbar dei plugin nella vostra versione specifica.
+        -->
         <actionSet id="com.cosmic.vpplugin.actions.MainActionSet">
+            <toolbar
+                    id="com.cosmic.vpplugin.actions.Toolbar1"
+                    orientation="north"
+                    index="new"/>
             <action
                     id="com.cosmic.vpplugin.actions.OpenAnalyzerPane"
                     actionType="generalAction"
-                    label="COSMIC AI Analyzer"
+                    label="COSMIC AI Analyzer..."
                     tooltip="Apri il pannello COSMIC AI per l'import dei requisiti e la generazione del diagramma"
-                    menuPath="Plug-ins/Cosmic AI">
+                    style="normal"
+                    menuPath="Tools"
+                    toolbarPath="com.cosmic.vpplugin.actions.Toolbar1/#">
                 <actionController class="com.cosmic.vpplugin.action.CosmicOpenPanelActionController"/>
             </action>
         </actionSet>
 
-        <!-- 2) Azione di fallback per il menu contestuale (diagramPopup) -->
-        <actionSet id="com.cosmic.vpplugin.actions.DiagramPopupActionSet">
+        <!--
+            VIA 2 - Fallback INFALLIBILE: voce nel popup menu (tasto destro)
+            di QUALSIASI diagramma, incluso il click sullo sfondo vuoto.
+            contextTypes all="true" = nessun filtro sul tipo di modello/
+            elemento/diagramma selezionato: la voce compare sempre,
+            indipendentemente da dove si clicca con il tasto destro.
+            menuPath="#" la posiziona in cima al menu contestuale (per
+            documentazione ufficiale, '#' = fronte del menu).
+        -->
+        <contextSensitiveActionSet id="com.cosmic.vpplugin.actions.DiagramPopupActionSet">
+            <contextTypes all="true"/>
             <action
-                    id="com.cosmic.vpplugin.actions.DiagramPopupAction"
-                    actionType="diagramPopup"
+                    id="com.cosmic.vpplugin.actions.OpenAnalyzerPaneContext"
                     label="Apri COSMIC AI Analyzer"
-                    tooltip="Apri il pannello COSMIC AI per l'import dei requisiti e la generazione del diagramma">
-                <actionController class="com.cosmic.vpplugin.action.CosmicDiagramPopupActionController"/>
+                    menuPath="#">
+                <actionController class="com.cosmic.vpplugin.action.CosmicOpenPanelContextActionController"/>
             </action>
-        </actionSet>
+        </contextSensitiveActionSet>
+
     </actionSets>
 
 </plugin>

@@ -1,5 +1,7 @@
 package com.cosmic.vpplugin.ui;
 
+import com.cosmic.vpplugin.calculator.CosmicCalculator;
+import com.cosmic.vpplugin.calculator.CosmicCalculator.CosmicReport;
 import com.cosmic.vpplugin.generator.UseCaseDiagramGenerator;
 import com.cosmic.vpplugin.mock.MockLlmResponse;
 import com.cosmic.vpplugin.model.CosmicJsonMapper;
@@ -58,6 +60,7 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
 
     private final JTextArea logArea = new JTextArea();
     private final JButton sendToOpenAiButton = new JButton("Invia ad OpenAI (Calcola COSMIC)");
+    private final JButton generateDemoButton = new JButton("Genera Demo (Mock)");
     private final JLabel dropZoneLabel = new JLabel(
             "<html><div style='text-align:center;'>Trascina qui il file dei requisiti<br/>(.json / .txt)</div></html>",
             SwingConstants.CENTER);
@@ -105,12 +108,24 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
     }
 
     private Component buildActionBar() {
-        JPanel bar = new JPanel(new BorderLayout());
+        JPanel bar = new JPanel(new BorderLayout(6, 0));
+
         // Mockato: la chiamata HTTP reale non e' ancora disponibile
         // (endpoint universitario non pronto). Il pulsante resta disabilitato
         // finche' quella integrazione non viene collegata.
         sendToOpenAiButton.setEnabled(false);
         sendToOpenAiButton.setToolTipText("Non ancora disponibile: in attesa dell'endpoint LLM universitario.");
+
+        // Pulsante esplicito per testare la pipeline (parsing + disegno UML +
+        // calcolo COSMIC) con i dati hardcoded in MockLlmResponse, SENZA che
+        // questo avvenga mai in modo implicito/automatico durante un normale
+        // Drag & Drop (si veda runMock() e il commento su readFileOrNull()).
+        generateDemoButton.setToolTipText("Esegue la pipeline completa sul JSON di esempio "
+                + "(MockLlmResponse), utile per verificare il funzionamento del plugin senza "
+                + "un file di requisiti reale.");
+        generateDemoButton.addActionListener(e -> runMock());
+
+        bar.add(generateDemoButton, BorderLayout.WEST);
         bar.add(sendToOpenAiButton, BorderLayout.CENTER);
         return bar;
     }
@@ -183,7 +198,12 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
             }
 
             log("File ricevuto: " + dropped.getName());
-            String jsonText = readFileOrFallback(dropped);
+            String jsonText = readFileOrNull(dropped);
+            if (jsonText == null) {
+                log("Errore: Il file caricato è vuoto o non valido. "
+                        + "Inserisci un file JSON contenente i requisiti.");
+                return; // esecuzione interrotta: nessun fallback automatico al mock
+            }
             processInBackground(jsonText);
 
         } catch (Exception ex) {
@@ -197,18 +217,42 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
         return name.endsWith(".json") || name.endsWith(".txt");
     }
 
-    private String readFileOrFallback(File file) {
+    /**
+     * Legge il contenuto del file droppato.
+     *
+     * A differenza della versione precedente ({@code readFileOrFallback}),
+     * questo metodo NON restituisce mai silenziosamente {@code MockLlmResponse.JSON}
+     * in caso di file vuoto o illeggibile: la generazione automatica del mock
+     * durante un Drag & Drop era un comportamento indesiderato (mascherava
+     * errori dell'utente facendo credere che il proprio file fosse stato
+     * elaborato). Restituisce {@code null} se il file e' vuoto o non
+     * leggibile; e' compito del chiamante ({@link #drop}) decidere come
+     * reagire (attualmente: loggare l'errore e interrompere l'esecuzione).
+     */
+    private String readFileOrNull(File file) {
         try {
             String content = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8).trim();
             if (content.isEmpty()) {
-                log("File vuoto: uso il mock interno di esempio.");
-                return MockLlmResponse.JSON;
+                return null;
             }
             return content;
         } catch (Exception e) {
-            log("Impossibile leggere il file, uso il mock interno: " + e.getMessage());
-            return MockLlmResponse.JSON;
+            log("Impossibile leggere il file '" + file.getName() + "': " + e.getMessage());
+            return null;
         }
+    }
+
+    /**
+     * Esegue esplicitamente la pipeline (parsing + disegno UML + calcolo
+     * COSMIC) sul JSON hardcoded in {@link MockLlmResponse}. Richiamato SOLO
+     * dal pulsante "Genera Demo (Mock)": mai in modo implicito da un file
+     * vuoto o non valido droppato dall'utente (si veda {@link #drop} e
+     * {@link #readFileOrNull}).
+     */
+    private void runMock() {
+        log("Generazione demo richiesta esplicitamente: uso il mock interno di esempio "
+                + "(MockLlmResponse), non un file caricato dall'utente.");
+        processInBackground(MockLlmResponse.JSON);
     }
 
     private void processInBackground(String jsonText) {
@@ -219,8 +263,15 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
                 new UseCaseDiagramGenerator().generate(model);
                 log("Diagramma generato: " + model.useCases.size() + " Use Case, "
                         + model.actors.size() + " Attori.");
+
+                // Fase 3: subito dopo il disegno UML, calcola i COSMIC Function
+                // Point sullo stesso modello gia' mappato (nessun nuovo parsing).
+                log("Calcolo COSMIC Function Points (CFP) in corso...");
+                CosmicReport report = new CosmicCalculator().compute(model);
+                log(report.toText());
+                log("Misurazione completata: " + report.totalCfp + " CFP totali.");
             } catch (Exception e) {
-                log("ERRORE nella generazione del diagramma: " + e.getMessage());
+                log("ERRORE nella generazione del diagramma o nel calcolo COSMIC: " + e.getMessage());
             }
         });
     }
