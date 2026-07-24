@@ -1,5 +1,7 @@
 package com.cosmic.vpplugin.ui;
 
+import com.cosmic.vpplugin.calculator.CosmicCalculator;
+import com.cosmic.vpplugin.calculator.CosmicCalculator.CosmicReport;
 import com.cosmic.vpplugin.generator.UseCaseDiagramGenerator;
 import com.cosmic.vpplugin.mock.MockLlmResponse;
 import com.cosmic.vpplugin.model.CosmicJsonMapper;
@@ -219,8 +221,15 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
                 new UseCaseDiagramGenerator().generate(model);
                 log("Diagramma generato: " + model.useCases.size() + " Use Case, "
                         + model.actors.size() + " Attori.");
+
+                // Fase 3: subito dopo il disegno UML, calcola i COSMIC Function
+                // Point sullo stesso modello gia' mappato (nessun nuovo parsing).
+                log("Calcolo COSMIC Function Points (CFP) in corso...");
+                CosmicReport report = new CosmicCalculator().compute(model);
+                log(report.toText());
+                log("Misurazione completata: " + report.totalCfp + " CFP totali.");
             } catch (Exception e) {
-                log("ERRORE nella generazione del diagramma: " + e.getMessage());
+                log("ERRORE nella generazione del diagramma o nel calcolo COSMIC: " + e.getMessage());
             }
         });
     }
