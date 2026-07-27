@@ -7,7 +7,11 @@ import com.vp.plugin.VPPlugin;
 import com.vp.plugin.VPPluginInfo;
 import com.vp.plugin.model.IProject;
 
+import javax.swing.BorderFactory;
+import javax.swing.JButton;
+import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
+import java.awt.FlowLayout;
 import java.awt.KeyEventDispatcher;
 import java.awt.KeyboardFocusManager;
 import java.awt.event.KeyEvent;
@@ -15,60 +19,62 @@ import java.awt.event.KeyEvent;
 /**
  * Entry point del plugin (dichiarato in plugin.xml, attributo "class").
  *
- * FASE 3 - BYPASS del sistema di menu dichiarativo di Visual Paradigm.
+ * FASE 5 - Abbandono definitivo di plugin.xml per i bottoni: componente
+ * nativo nel Message Pane.
  *
  * ---------------------------------------------------------------------
- * PERCHE' QUESTO CAMBIAMENTO
+ * PERCHE' QUESTO CAMBIAMENTO (rispetto alla Fase 3)
  * ---------------------------------------------------------------------
- * Nella build di VP attualmente in uso, il file plugin.xml (menuPath="Tools",
- * "Plug-ins/...", e persino un intero <contextSensitiveActionSet> con
- * contextTypes all="true") viene sistematicamente IGNORATO dalla Sleek UI:
- * nessuna voce compare, nonostante il plugin si carichi correttamente (il
- * messaggio "[COSMIC AI] Plugin caricato" viene mostrato). Cambiare l'id del
- * plugin per invalidare la cache non ha risolto il problema: si tratta quindi
- * di un problema di risoluzione del descrittore XML, non di caching.
+ * L'analisi di vp.log ha escluso ogni causa "riparabile" lato nostro
+ * (nessun errore di parsing XML, nessuna ClassNotFoundException sugli
+ * Action Controller, versione Java corretta): la build Community di VP
+ * scarta deliberatamente e silenziosamente le voci di menu/toolbar dei
+ * plugin di terze parti. Il precedente workaround "hack" (iniezione diretta
+ * nella JMenuBar Swing del root frame, poi rimosso in Fase 3) non era
+ * comunque una soluzione accettabile in un'architettura pulita.
  *
- * Non possiamo permetterci che l'intera tesi dipenda da un meccanismo che
- * l'IDE ospite si rifiuta di esporre. Per questo motivo il punto di accesso
- * REALE all'Analyzer non passa piu' (solo) dal plugin.xml, ma viene creato a
- * runtime, in Java puro, con un unico meccanismo che non ha alcuna
- * dipendenza dal sistema di menu/toolbar della Open API:
+ * La soluzione adottata ora e' invece un meccanismo 100% documentato e
+ * pubblico della Open API, pensato esattamente per questo scopo:
+ * {@code com.vp.plugin.ViewManager.showMessagePaneComponent(String id,
+ * String title, java.awt.Component messageComponent)}. A differenza della
+ * JMenuBar (superficie "grezza" Swing che la Sleek UI ridisegna sopra con un
+ * layer proprietario), il Message Pane e' un'area dell'IDE esplicitamente
+ * riservata dalla Open API all'inserimento di componenti custom: la scheda
+ * risultante e' nativa, dockabile e visibile senza alcun aggancio non
+ * documentato.
  *
- * Un {@link KeyEventDispatcher} globale registrato su
- * {@link KeyboardFocusManager#getCurrentKeyboardFocusManager()}: intercetta
- * la combinazione CTRL+ALT+C in QUALSIASI finestra della JVM di VP, prima che
- * l'evento raggiunga qualunque altro componente. Questo e' puro AWT: non
- * passa per VPAction, VPActionController, ne' per alcuna registrazione
- * dichiarativa, quindi non puo' essere "nascosto" dalla Sleek UI, ed e'
- * indipendente da qualunque scelta di toolkit UI fatta da VP.
+ * Restano invariati (perche' funzionano correttamente e non hanno alcun
+ * legame col problema del plugin.xml):
+ *
+ *  - La scorciatoia globale CTRL+ALT+C ({@link KeyEventDispatcher} su
+ *    {@link KeyboardFocusManager}), mantenuta come via rapida aggiuntiva.
+ *
+ *  - I listener di progetto introdotti in Fase 4
+ *    ({@link CosmicModelChangeListener}, che implementa
+ *    {@code IProjectListener}, {@code IProjectDiagramListener} e
+ *    {@code IProjectModelListener}): i log "[COSMIC AI][listener] Diagramma
+ *    aggiunto..." confermano che sono attivi e funzionanti in background,
+ *    del tutto indipendenti dal problema di visibilita' dei menu.
+ *
+ * NOTA su "IProjectManagerListener": nella richiesta di refactoring viene
+ * citata anche questa interfaccia come già presente. Non ho trovato
+ * conferma della sua esistenza nella Open API pubblica di VP (la Open API
+ * espone IProjectListener/IProjectDiagramListener/IProjectModelListener,
+ * registrati sulla singola istanza di IProject, non un listener "a livello
+ * di ProjectManager" per essere avvisati di ogni apertura/cambio progetto -
+ * si veda il "LIMITE NOTO" piu' sotto). Questa classe continua quindi a
+ * registrare solo le 3 interfacce confermate; se nel vostro branch esiste
+ * davvero una IProjectManagerListener funzionante (magari da una versione
+ * piu' recente di openapi.jar), fatemi avere la sua firma esatta e la
+ * integro subito.
  *
  * ---------------------------------------------------------------------
- * PERCHE' NON C'E' (PIU') UNA VOCE DI MENU INIETTATA A RUNTIME
+ * LIMITE NOTO INVARIATO (da Fase 4, non ancora risolto)
  * ---------------------------------------------------------------------
- * Una prima versione di questa classe tentava anche di iniettare una voce
- * "COSMIC AI" direttamente nella {@code JMenuBar} del root frame ottenuto con
- * {@code ApplicationManager.instance().getViewManager().getRootFrame()} (la
- * stessa chiamata usata con successo in Fase 1 per il {@code DropTarget}, che
- * quindi si risolve correttamente in questo ambiente). Il tentativo e' stato
- * verificato empiricamente: il {@code JMenuItem} veniva creato e aggiunto
- * senza eccezioni, ma non compariva mai nella UI. La Sleek UI di Visual
- * Paradigm non usa quindi la {@code JMenuBar} Swing "grezza" del root frame
- * come superficie di rendering reale del proprio menu (probabilmente la
- * ridisegna con un layer/toolkit proprietario sopra o al posto di essa),
- * rendendo l'iniezione AWT/Swing diretta silenziosamente inefficace, oltre
- * che fragile (dipendente da dettagli implementativi non documentati che
- * potrebbero cambiare da una build all'altra).
- *
- * Per questo motivo la logica di iniezione e' stata rimossa: la scorciatoia
- * globale CTRL+ALT+C resta l'UNICO punto di accesso realmente garantito, ed
- * e' anche l'unico che serve, visto che funziona in modo affidabile.
- *
- * I vecchi VPActionController (CosmicOpenPanelActionController,
- * CosmicOpenPanelContextActionController, CosmicDiagramPopupActionController)
- * e il relativo plugin.xml NON vanno rimossi: se in una versione futura di VP
- * il descrittore verra' risolto correttamente, quelle voci di menu inizieranno
- * semplicemente a funzionare anche loro, senza alcun conflitto (chiamano lo
- * stesso showDialog(new CosmicAnalyzerDialogHandler())).
+ * I listener di progetto restano legati all'istanza di {@link IProject}
+ * presente al momento di {@code loaded()}. Se l'utente cambia progetto
+ * durante la sessione, andranno ri-registrati: rimandato al prossimo step,
+ * come già segnalato in Fase 4.
  */
 public class CosmicPlugin implements VPPlugin {
 
@@ -76,34 +82,36 @@ public class CosmicPlugin implements VPPlugin {
     private static final int SHORTCUT_KEYCODE = KeyEvent.VK_C;
     private static final int SHORTCUT_MODIFIERS = KeyEvent.CTRL_DOWN_MASK | KeyEvent.ALT_DOWN_MASK;
 
+    /** Id univoco della scheda nel Message Pane (richiesto da show/removeMessagePaneComponent). */
+    private static final String LAUNCHER_PANE_ID = "cosmic.ai.launcher";
+    private static final String LAUNCHER_PANE_TITLE = "COSMIC AI";
+
     private KeyEventDispatcher keyEventDispatcher;
 
     /**
-     * Fase 4 (fondamenta): unica istanza del listener che, nel prossimo
-     * step, innescherà il ricalcolo COSMIC in tempo reale. Per ora si
-     * limita a loggare gli eventi intercettati (si veda il suo javadoc).
+     * Fase 4: unica istanza del listener che, nel prossimo step, innescherà
+     * il ricalcolo COSMIC in tempo reale. Per ora si limita a loggare gli
+     * eventi intercettati (si veda il suo javadoc).
      */
     private final CosmicModelChangeListener modelChangeListener = new CosmicModelChangeListener();
 
     @Override
     public void loaded(VPPluginInfo info) {
-        // Unico meccanismo di accesso: intercettazione globale della
-        // scorciatoia. Nessun'altra registrazione (menu, toolbar, ecc.) e'
-        // necessaria né tentata: si e' rivelata inutile in questo ambiente
-        // (si veda il javadoc della classe).
+        // Via rapida invariata da Fase 3: scorciatoia globale.
         installGlobalShortcut();
 
-        // Fase 4 (fondamenta): aggancio del listener di eventi real-time al
-        // progetto eventualmente già aperto. Non fa ancora nulla di
-        // funzionale (si veda CosmicModelChangeListener): serve solo a
-        // verificare che l'aggancio stesso funzioni, in modo che il
-        // prossimo step possa concentrarsi sulla logica di ricalcolo.
+        // Fase 4 (fondamenta), invariata: aggancio del listener di eventi
+        // real-time al progetto eventualmente già aperto.
         registerModelChangeListenerOnCurrentProject();
 
+        // Fase 5: punto di accesso nativo e documentato, sostituisce ogni
+        // tentativo basato su plugin.xml o iniezione Swing diretta.
+        registerLauncherMessagePaneComponent();
+
         ApplicationManager.instance().getViewManager().showMessage(
-                "[COSMIC AI] Plugin caricato. Premi CTRL+ALT+C in qualsiasi momento "
-                        + "per aprire 'COSMIC AI Analyzer' (i menu Tools/Plug-ins non sono "
-                        + "attualmente esposti dalla UI di VP).");
+                "[COSMIC AI] Plugin caricato. Apri la scheda 'COSMIC AI' nel pannello messaggi "
+                        + "in basso, oppure premi CTRL+ALT+C in qualsiasi momento, per aprire "
+                        + "'COSMIC AI Analyzer'.");
     }
 
     @Override
@@ -114,15 +122,50 @@ public class CosmicPlugin implements VPPlugin {
             keyEventDispatcher = null;
         }
         unregisterModelChangeListenerFromCurrentProject();
+        unregisterLauncherMessagePaneComponent();
         System.out.println("[COSMIC AI] Plugin disattivato.");
     }
 
     // ------------------------------------------------------------------
-    // Fase 4 (fondamenta): aggancio/distacco del listener di eventi
-    // real-time. Nessuna logica di ricalcolo qui: solo infrastruttura.
-    // Si veda il javadoc di CosmicModelChangeListener per il "perché" di
-    // queste 3 interfacce e per il limite noto (cambio di progetto) da
-    // risolvere nel prossimo step.
+    // Fase 5: componente nativo nel Message Pane (sostituisce plugin.xml)
+    // ------------------------------------------------------------------
+
+    /**
+     * Costruisce il piccolo pannello di lancio: un solo bottone centrato che
+     * apre il pannello flottante non-modale {@link CosmicAnalyzerDialogHandler}
+     * (lo stesso già usato dalla scorciatoia CTRL+ALT+C).
+     */
+    private JPanel buildLauncherPanel() {
+        JPanel panel = new JPanel(new FlowLayout(FlowLayout.CENTER));
+        panel.setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+
+        JButton openButton = new JButton("Apri COSMIC AI Analyzer...");
+        openButton.setToolTipText("Apre il pannello COSMIC AI per l'import dei requisiti "
+                + "e la generazione del diagramma (equivalente a CTRL+ALT+C).");
+        openButton.addActionListener(e -> openAnalyzerPanel());
+
+        panel.add(openButton);
+        return panel;
+    }
+
+    private void registerLauncherMessagePaneComponent() {
+        SwingUtilities.invokeLater(() ->
+                ApplicationManager.instance().getViewManager()
+                        .showMessagePaneComponent(LAUNCHER_PANE_ID, LAUNCHER_PANE_TITLE, buildLauncherPanel()));
+    }
+
+    private void unregisterLauncherMessagePaneComponent() {
+        try {
+            ApplicationManager.instance().getViewManager().removeMessagePaneComponent(LAUNCHER_PANE_ID);
+        } catch (Exception ignored) {
+            // best effort: non deve mai bloccare lo scaricamento del plugin
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Fase 4 (fondamenta), invariata: aggancio/distacco del listener di
+    // eventi real-time. Nessuna logica di ricalcolo qui: solo
+    // infrastruttura. Si veda il javadoc di CosmicModelChangeListener.
     // ------------------------------------------------------------------
 
     private void registerModelChangeListenerOnCurrentProject() {
@@ -130,10 +173,9 @@ public class CosmicPlugin implements VPPlugin {
             IProject project = ApplicationManager.instance().getProjectManager().getProject();
             if (project == null) {
                 // Nessun progetto aperto al momento del caricamento del
-                // plugin: normale, ad es. se VP e' appena stato avviato
-                // senza aprire nulla. TODO (prossimo step): agganciarsi
-                // anche quando un progetto viene aperto/creato in seguito
-                // (si veda il "LIMITE NOTO" nel javadoc del listener).
+                // plugin. TODO (prossimo step): agganciarsi anche quando un
+                // progetto viene aperto/creato in seguito (si veda il
+                // "LIMITE NOTO" nel javadoc della classe e del listener).
                 return;
             }
             project.addProjectListener(modelChangeListener);
@@ -167,7 +209,7 @@ public class CosmicPlugin implements VPPlugin {
     }
 
     // ------------------------------------------------------------------
-    // 1) Scorciatoia globale (garantita, puro java.awt)
+    // Scorciatoia globale invariata (garantita, puro java.awt)
     // ------------------------------------------------------------------
 
     private void installGlobalShortcut() {
@@ -185,8 +227,9 @@ public class CosmicPlugin implements VPPlugin {
     }
 
     // ------------------------------------------------------------------
-    // Apertura effettiva del pannello (unico punto, riusato dalla
-    // scorciatoia e potenzialmente anche dai vecchi VPActionController)
+    // Apertura effettiva del pannello (unico punto, riusato dal bottone nel
+    // Message Pane, dalla scorciatoia, e potenzialmente dai vecchi
+    // VPActionController se un domani plugin.xml tornasse a funzionare)
     // ------------------------------------------------------------------
 
     private void openAnalyzerPanel() {
