@@ -1,9 +1,11 @@
 package com.cosmic.vpplugin;
 
+import com.cosmic.vpplugin.listener.CosmicModelChangeListener;
 import com.cosmic.vpplugin.ui.CosmicAnalyzerDialogHandler;
 import com.vp.plugin.ApplicationManager;
 import com.vp.plugin.VPPlugin;
 import com.vp.plugin.VPPluginInfo;
+import com.vp.plugin.model.IProject;
 
 import javax.swing.SwingUtilities;
 import java.awt.KeyEventDispatcher;
@@ -76,6 +78,13 @@ public class CosmicPlugin implements VPPlugin {
 
     private KeyEventDispatcher keyEventDispatcher;
 
+    /**
+     * Fase 4 (fondamenta): unica istanza del listener che, nel prossimo
+     * step, innescherà il ricalcolo COSMIC in tempo reale. Per ora si
+     * limita a loggare gli eventi intercettati (si veda il suo javadoc).
+     */
+    private final CosmicModelChangeListener modelChangeListener = new CosmicModelChangeListener();
+
     @Override
     public void loaded(VPPluginInfo info) {
         // Unico meccanismo di accesso: intercettazione globale della
@@ -83,6 +92,13 @@ public class CosmicPlugin implements VPPlugin {
         // necessaria né tentata: si e' rivelata inutile in questo ambiente
         // (si veda il javadoc della classe).
         installGlobalShortcut();
+
+        // Fase 4 (fondamenta): aggancio del listener di eventi real-time al
+        // progetto eventualmente già aperto. Non fa ancora nulla di
+        // funzionale (si veda CosmicModelChangeListener): serve solo a
+        // verificare che l'aggancio stesso funzioni, in modo che il
+        // prossimo step possa concentrarsi sulla logica di ricalcolo.
+        registerModelChangeListenerOnCurrentProject();
 
         ApplicationManager.instance().getViewManager().showMessage(
                 "[COSMIC AI] Plugin caricato. Premi CTRL+ALT+C in qualsiasi momento "
@@ -97,7 +113,57 @@ public class CosmicPlugin implements VPPlugin {
                     .removeKeyEventDispatcher(keyEventDispatcher);
             keyEventDispatcher = null;
         }
+        unregisterModelChangeListenerFromCurrentProject();
         System.out.println("[COSMIC AI] Plugin disattivato.");
+    }
+
+    // ------------------------------------------------------------------
+    // Fase 4 (fondamenta): aggancio/distacco del listener di eventi
+    // real-time. Nessuna logica di ricalcolo qui: solo infrastruttura.
+    // Si veda il javadoc di CosmicModelChangeListener per il "perché" di
+    // queste 3 interfacce e per il limite noto (cambio di progetto) da
+    // risolvere nel prossimo step.
+    // ------------------------------------------------------------------
+
+    private void registerModelChangeListenerOnCurrentProject() {
+        try {
+            IProject project = ApplicationManager.instance().getProjectManager().getProject();
+            if (project == null) {
+                // Nessun progetto aperto al momento del caricamento del
+                // plugin: normale, ad es. se VP e' appena stato avviato
+                // senza aprire nulla. TODO (prossimo step): agganciarsi
+                // anche quando un progetto viene aperto/creato in seguito
+                // (si veda il "LIMITE NOTO" nel javadoc del listener).
+                return;
+            }
+            project.addProjectListener(modelChangeListener);
+            project.addProjectDiagramListener(modelChangeListener);
+            project.addProjectModelListener(modelChangeListener);
+        } catch (Exception ex) {
+            // Non deve mai impedire il caricamento del plugin: e' solo
+            // predisposizione per una funzionalita' futura.
+            System.out.println("[COSMIC AI] Aggancio dei listener di modello non riuscito: " + ex);
+        }
+    }
+
+    private void unregisterModelChangeListenerFromCurrentProject() {
+        // NOTA: la documentazione consultata conferma esplicitamente solo i
+        // metodi addProjectListener/addProjectDiagramListener/
+        // addProjectModelListener; i corrispondenti removeXxxListener sono
+        // presunti per simmetria (convenzione standard nelle Open API di
+        // VP) ma non ancora verificati sul Javadoc di openapi.jar. Se il
+        // nome esatto risultasse diverso, va corretto qui e solo qui.
+        try {
+            IProject project = ApplicationManager.instance().getProjectManager().getProject();
+            if (project == null) {
+                return;
+            }
+            project.removeProjectListener(modelChangeListener);
+            project.removeProjectDiagramListener(modelChangeListener);
+            project.removeProjectModelListener(modelChangeListener);
+        } catch (Exception ignored) {
+            // best effort anche in rimozione
+        }
     }
 
     // ------------------------------------------------------------------

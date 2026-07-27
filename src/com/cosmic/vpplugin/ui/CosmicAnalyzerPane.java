@@ -3,7 +3,6 @@ package com.cosmic.vpplugin.ui;
 import com.cosmic.vpplugin.calculator.CosmicCalculator;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.CosmicReport;
 import com.cosmic.vpplugin.generator.UseCaseDiagramGenerator;
-import com.cosmic.vpplugin.mock.MockLlmResponse;
 import com.cosmic.vpplugin.model.CosmicJsonMapper;
 import com.cosmic.vpplugin.model.CosmicJsonModel;
 
@@ -60,7 +59,6 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
 
     private final JTextArea logArea = new JTextArea();
     private final JButton sendToOpenAiButton = new JButton("Invia ad OpenAI (Calcola COSMIC)");
-    private final JButton generateDemoButton = new JButton("Genera Demo (Mock)");
     private final JLabel dropZoneLabel = new JLabel(
             "<html><div style='text-align:center;'>Trascina qui il file dei requisiti<br/>(.json / .txt)</div></html>",
             SwingConstants.CENTER);
@@ -108,24 +106,12 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
     }
 
     private Component buildActionBar() {
-        JPanel bar = new JPanel(new BorderLayout(6, 0));
-
+        JPanel bar = new JPanel(new BorderLayout());
         // Mockato: la chiamata HTTP reale non e' ancora disponibile
         // (endpoint universitario non pronto). Il pulsante resta disabilitato
         // finche' quella integrazione non viene collegata.
         sendToOpenAiButton.setEnabled(false);
         sendToOpenAiButton.setToolTipText("Non ancora disponibile: in attesa dell'endpoint LLM universitario.");
-
-        // Pulsante esplicito per testare la pipeline (parsing + disegno UML +
-        // calcolo COSMIC) con i dati hardcoded in MockLlmResponse, SENZA che
-        // questo avvenga mai in modo implicito/automatico durante un normale
-        // Drag & Drop (si veda runMock() e il commento su readFileOrNull()).
-        generateDemoButton.setToolTipText("Esegue la pipeline completa sul JSON di esempio "
-                + "(MockLlmResponse), utile per verificare il funzionamento del plugin senza "
-                + "un file di requisiti reale.");
-        generateDemoButton.addActionListener(e -> runMock());
-
-        bar.add(generateDemoButton, BorderLayout.WEST);
         bar.add(sendToOpenAiButton, BorderLayout.CENTER);
         return bar;
     }
@@ -240,19 +226,6 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
             log("Impossibile leggere il file '" + file.getName() + "': " + e.getMessage());
             return null;
         }
-    }
-
-    /**
-     * Esegue esplicitamente la pipeline (parsing + disegno UML + calcolo
-     * COSMIC) sul JSON hardcoded in {@link MockLlmResponse}. Richiamato SOLO
-     * dal pulsante "Genera Demo (Mock)": mai in modo implicito da un file
-     * vuoto o non valido droppato dall'utente (si veda {@link #drop} e
-     * {@link #readFileOrNull}).
-     */
-    private void runMock() {
-        log("Generazione demo richiesta esplicitamente: uso il mock interno di esempio "
-                + "(MockLlmResponse), non un file caricato dall'utente.");
-        processInBackground(MockLlmResponse.JSON);
     }
 
     private void processInBackground(String jsonText) {
