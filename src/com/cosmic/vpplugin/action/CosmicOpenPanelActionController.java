@@ -1,33 +1,28 @@
 package com.cosmic.vpplugin.action;
 
-import com.cosmic.vpplugin.ui.CosmicAnalyzerDialogHandler;
 import com.vp.plugin.ApplicationManager;
 import com.vp.plugin.action.VPAction;
 import com.vp.plugin.action.VPActionController;
 
 /**
- * Action Controller richiesto dalla Open API per le azioni di menu/toolbar
- * (deve implementare {@code com.vp.plugin.action.VPActionController}, con
- * costruttore senza argomenti — si veda plugin.xml, elemento
- * {@code <actionController class="...">}).
- *
- * Al click sulla voce di menu "COSMIC AI Analyzer..." apre il pannello non
- * modale {@link CosmicAnalyzerDialogHandler}.
+ * Action Controller per il menu (fallback se plugin.xml riprende a funzionare).
+ * Ora porta in primo piano la scheda nativa del Message Pane.
  */
 public class CosmicOpenPanelActionController implements VPActionController {
 
-    // Costruttore senza argomenti richiesto dalla Open API.
     public CosmicOpenPanelActionController() {
     }
 
     @Override
     public void performAction(VPAction action) {
-        ApplicationManager.instance().getViewManager()
-                .showDialog(new CosmicAnalyzerDialogHandler());
+        try {
+            ApplicationManager.instance().getViewManager().showMessagePaneComponent("cosmic.ai.launcher");
+        } catch (Exception e) {
+            System.out.println("[COSMIC AI] Impossibile portare in primo piano il pannello: " + e);
+        }
     }
 
     @Override
     public void update(VPAction action) {
-        // nessuna proprieta' dinamica da aggiornare per questa azione
     }
 }
