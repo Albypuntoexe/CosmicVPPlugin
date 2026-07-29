@@ -9,6 +9,7 @@ import com.cosmic.vpplugin.model.CosmicJsonModel;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
+import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -16,6 +17,7 @@ import javax.swing.JTextArea;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.border.Border;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
@@ -91,6 +93,19 @@ import java.util.concurrent.Executors;
  *  4) Quel JSON viene infine passato alla pipeline già esistente
  *     ({@link #processInBackground}): parsing con {@link CosmicJsonMapper},
  *     disegno del diagramma, calcolo COSMIC.
+ *
+ * FASE 7: il Drag & Drop nativo si e' rivelato inaffidabile all'interno di
+ * Visual Paradigm, perche' il framework di docking proprietario dell'IDE
+ * intercetta gli eventi nativi di Drag & Drop del sistema operativo prima
+ * che possano "gocciolare" fino al nostro {@code DropTarget} Swing. Il
+ * {@code DropTarget} su {@link #dropZoneLabel} NON e' stato rimosso (resta
+ * un tentativo silenzioso, utile se funzionasse su altre combinazioni di
+ * OS/versione di VP), ma la via di caricamento principale e ufficialmente
+ * supportata diventa il pulsante "Seleziona File Requisiti..." (si veda
+ * {@link #buildDropZone()} e {@link #onChooseFileClicked()}), che usa un
+ * {@link JFileChooser} standard: entrambi i percorsi convergono sullo
+ * stesso metodo {@link #handleSelectedFile(File)}, quindi validazione e
+ * comportamento in caso di file vuoto/non valido sono identici.
  */
 public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
 
@@ -109,8 +124,9 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
 
     private final JTextArea logArea = new JTextArea();
     private final JButton sendToOpenAiButton = new JButton("Invia ad OpenAI (Calcola COSMIC)");
+    private final JButton chooseFileButton = new JButton("Seleziona File Requisiti...");
     private final JLabel dropZoneLabel = new JLabel(
-            "<html><div style='text-align:center;'>Trascina qui il file dei requisiti<br/>(.json / .txt)</div></html>",
+            "<html><div style='text-align:center;'>(Opzionale) Trascina qui il file dei requisiti<br/>(.json / .txt)</div></html>",
             SwingConstants.CENTER);
 
     private final SimpleDateFormat timeFormat = new SimpleDateFormat("HH:mm:ss");
@@ -142,18 +158,22 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
     public CosmicAnalyzerPane() {
         super(new BorderLayout(8, 8));
         setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        // NOTA Fase 6: nessuna setPreferredSize(...) fissa: il pannello e'
+        // ora una vista nativa dentro il Message Pane (non piu' una
+        // finestra fluttuante dimensionata con pack()), quindi deve potersi
+        // adattare allo spazio che l'IDE gli assegna.
 
         add(buildDropZone(), BorderLayout.NORTH);
         add(buildLogArea(), BorderLayout.CENTER);
         add(buildActionBar(), BorderLayout.SOUTH);
 
-        // FIX: Espandiamo il DropTarget a TUTTO il pannello, inclusa la console dei log
-        this.setDropTarget(new DropTarget(this, this));
-        dropZoneLabel.setDropTarget(new DropTarget(dropZoneLabel, this));
-        logArea.setDropTarget(new DropTarget(logArea, this));
+        // Il DropTarget e' installato SOLO su questo pannello, non sul
+        // root frame di Visual Paradigm.
+        new DropTarget(dropZoneLabel, this);
 
-        log("Pannello pronto. Trascina un file .json/.txt ovunque su questo pannello, poi premi "
-                + "'Invia ad OpenAI' per generare il diagramma e calcolare i CFP.");
+        log("Pannello pronto. Premi 'Seleziona File Requisiti...' (o, se disponibile, trascina "
+                + "un file .json/.txt sulla Drop Zone) e poi 'Invia ad OpenAI' per generare il "
+                + "diagramma e calcolare i CFP.");
     }
 
     // ------------------------------------------------------------------
@@ -161,13 +181,25 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
     // ------------------------------------------------------------------
 
     private Component buildDropZone() {
-        dropZoneLabel.setPreferredSize(new Dimension(380, 110));
+        dropZoneLabel.setPreferredSize(new Dimension(380, 90));
         dropZoneLabel.setOpaque(true);
         dropZoneLabel.setBackground(new Color(245, 247, 250));
         dropZoneLabel.setForeground(new Color(90, 90, 90));
         dropZoneLabel.setFont(dropZoneLabel.getFont().deriveFont(Font.PLAIN, 13f));
         dropZoneLabel.setBorder(new DashedBorder());
-        return dropZoneLabel;
+
+        // Fase 7: via principale di caricamento, dato che il D&D nativo e'
+        // inaffidabile dentro il framework di docking di VP (si veda il
+        // javadoc di classe). Stesso identico esito di un drop riuscito:
+        // entrambi i percorsi convergono su handleSelectedFile(File).
+        chooseFileButton.setToolTipText("Apre una finestra di selezione file: via consigliata, "
+                + "il Drag & Drop nativo puo' non funzionare all'interno di Visual Paradigm.");
+        chooseFileButton.addActionListener(e -> onChooseFileClicked());
+
+        JPanel wrapper = new JPanel(new BorderLayout(0, 6));
+        wrapper.add(dropZoneLabel, BorderLayout.CENTER);
+        wrapper.add(chooseFileButton, BorderLayout.SOUTH);
+        return wrapper;
     }
 
     private Component buildLogArea() {
@@ -251,32 +283,69 @@ public class CosmicAnalyzerPane extends JPanel implements DropTargetListener {
                 return;
             }
 
-            File dropped = files.get(0);
-            if (!accepts(dropped)) {
-                log("File ignorato: estensione non supportata (" + dropped.getName() + ")");
-                return;
-            }
-
-            String content = readFileOrNull(dropped);
-            if (content == null) {
-                log("Errore: Il file caricato è vuoto o non valido. "
-                        + "Inserisci un file JSON contenente i requisiti.");
-                pendingRequirementsText = null;
-                return; // esecuzione interrotta: nessun fallback automatico al mock
-            }
-
-            // Fase 6: NON si generano piu' diagramma/CFP direttamente da
-            // qui. Il contenuto e' testo libero di requisiti, destinato
-            // all'LLM: viene solo memorizzato, in attesa del click su
-            // "Invia ad OpenAI".
-            pendingRequirementsText = content;
-            log("File ricevuto: " + dropped.getName() + " (" + content.length() + " caratteri). "
-                    + "Premi 'Invia ad OpenAI (Calcola COSMIC)' per avviare l'analisi.");
+            // Fase 7: stessa identica validazione/logica usata dal pulsante
+            // "Seleziona File Requisiti..." (si veda handleSelectedFile).
+            handleSelectedFile(files.get(0));
 
         } catch (Exception ex) {
             dtde.dropComplete(false);
             log("ERRORE durante il drop: " + ex.getMessage());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Fase 7: File Chooser (via principale, il D&D nativo e' inaffidabile
+    // all'interno del framework di docking di Visual Paradigm)
+    // ------------------------------------------------------------------
+
+    private void onChooseFileClicked() {
+        // JFileChooser e' invocato direttamente sull'EDT: il click del
+        // bottone arriva gia' sull'EDT, e showOpenDialog(...) e' bloccante
+        // solo per la durata della selezione da parte dell'utente (comportamento
+        // normale e atteso per un file chooser modale).
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Seleziona il file dei requisiti");
+        chooser.setFileFilter(new FileNameExtensionFilter("Requisiti (*.json, *.txt)", "json", "txt"));
+        chooser.setMultiSelectionEnabled(false);
+
+        int result = chooser.showOpenDialog(this);
+        if (result != JFileChooser.APPROVE_OPTION) {
+            return; // utente ha annullato: nessun log necessario
+        }
+
+        File selected = chooser.getSelectedFile();
+        if (selected != null) {
+            handleSelectedFile(selected);
+        }
+    }
+
+    /**
+     * Punto unico di validazione/lettura di un file di requisiti, sia che
+     * provenga da un drop riuscito sia dal {@link JFileChooser}: stessa
+     * logica esatta usata in precedenza solo da {@link #drop}, ora
+     * condivisa per garantire che i due percorsi si comportino in modo
+     * identico (stesso controllo estensione, stesso comportamento su file
+     * vuoto/non leggibile, stesso aggiornamento di {@link #pendingRequirementsText}).
+     */
+    private void handleSelectedFile(File file) {
+        if (!accepts(file)) {
+            log("File ignorato: estensione non supportata (" + file.getName() + ")");
+            return;
+        }
+
+        String content = readFileOrNull(file);
+        if (content == null) {
+            log("Errore: Il file caricato è vuoto o non valido. "
+                    + "Inserisci un file JSON contenente i requisiti.");
+            pendingRequirementsText = null;
+            return; // esecuzione interrotta: nessun fallback automatico al mock
+        }
+
+        // Il contenuto e' testo libero di requisiti, destinato all'LLM:
+        // viene solo memorizzato, in attesa del click su "Invia ad OpenAI".
+        pendingRequirementsText = content;
+        log("File caricato: " + file.getName() + " (" + content.length() + " caratteri). "
+                + "Premi 'Invia ad OpenAI (Calcola COSMIC)' per avviare l'analisi.");
     }
 
     private boolean accepts(File file) {
