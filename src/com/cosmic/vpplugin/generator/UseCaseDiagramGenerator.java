@@ -23,29 +23,31 @@ import com.vp.plugin.model.factory.IModelElementFactory;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Traduce un {@link CosmicJsonModel} in un vero Use Case Diagram dentro il
  * progetto Visual Paradigm correntemente aperto.
  *
- * ATTENZIONE (revisione dopo errori di compilazione riportati dall'utente):
- * questa classe e' stata riscritta usando ESCLUSIVAMENTE l'API confermata
- * dalla documentazione ufficiale Visual Paradigm (Know-how "Create Use Case
- * Diagram using Open API" + JavaDoc di {@code com.vp.plugin.DiagramManager}).
- * La versione precedente usava una classe {@code ModelElementFactory}
- * (package {@code diagram.factory}) e una interfaccia
- * {@code IDiagramTypeConstants} che si sono rivelate non risolvibili nella
- * vostra installazione: sono state rimosse.
- *
- * Pattern reale della Open API (5 step, per ogni elemento):
+ * Pattern Open API (5 step, per ogni elemento), confermato dalla guida
+ * ufficiale VP ("Working with diagrams/Diagram elements"):
  *  1. Creare l'oggetto di MODELLO con {@link IModelElementFactory#instance()}.
  *  2. Impostarne le proprieta' (name, description, ...).
  *  3. Creare la sua "shape" (presentation) con
- *     {@link DiagramManager#createDiagramElement(com.vp.plugin.diagram.IDiagramUIModel, com.vp.plugin.model.IModelElement)}.
+ *     {@link DiagramManager#createDiagramElement}.
  *  4. Impostare le proprieta' grafiche della shape (bounds/posizione).
  *  5. Per le relazioni: creare il modello (Association/Include/Extend),
  *     impostare from/to, poi creare il connettore con
- *     {@link DiagramManager#createConnector(com.vp.plugin.diagram.IDiagramUIModel, com.vp.plugin.model.IModelElement, IDiagramElement, IDiagramElement, java.awt.Point[])}.
+ *     {@link DiagramManager#createConnector}.
+ *
+ * MODIFICA rispetto alla versione precedente: le righe di log/debug sulle
+ * relazioni include/extend non vengono piu' scritte con
+ * {@code ApplicationManager.getViewManager().showMessage(...)} (che le
+ * mandava nel Message Pane GLOBALE di Visual Paradigm, visibile e
+ * persistente per tutta la sessione, anche dopo la chiusura del pannello
+ * COSMIC AI). Vengono invece inviate al {@link #logSink} opzionale,
+ * normalmente collegato al log del dialog di analisi: stesso contenuto
+ * informativo, ma confinato alla UI del plugin.
  */
 public final class UseCaseDiagramGenerator {
 
@@ -64,6 +66,14 @@ public final class UseCaseDiagramGenerator {
     private static final int UC_H = 90;
 
     private final DiagramManager diagramManager = ApplicationManager.instance().getDiagramManager();
+
+    /** No-op di default: chi non imposta un log sink non perde alcuna funzionalita'. */
+    private Consumer<String> logSink = message -> { };
+
+    /** Collega il generatore al log della UI che ha invocato l'analisi (dialog, futura chat, ecc.). */
+    public void setLogSink(Consumer<String> logSink) {
+        this.logSink = (logSink != null) ? logSink : (message -> { });
+    }
 
     public void generate(CosmicJsonModel model) {
         IUseCaseDiagramUIModel diagram = createDiagram(model.projectName);
@@ -87,14 +97,6 @@ public final class UseCaseDiagramGenerator {
     // ------------------------------------------------------------------
 
     private IUseCaseDiagramUIModel createDiagram(String projectName) {
-        // NOTA: DiagramManager.DIAGRAM_TYPE_USE_CASE_DIAGRAM e' formalmente
-        // "deprecated in favore di IDiagramTypeConstants" nella documentazione
-        // VP, ma resta funzionante ed e' garantito presente in ogni versione
-        // (a differenza di IDiagramTypeConstants, che nella vostra
-        // installazione non si e' risolto). Se in futuro volete rimuovere il
-        // warning di deprecazione, verificate nell'IDE quale package espone
-        // davvero IDiagramTypeConstants nella vostra versione di openapi.jar
-        // e sostituite la costante qui sotto.
         @SuppressWarnings("deprecation")
         String diagramType = DiagramManager.DIAGRAM_TYPE_USE_CASE_DIAGRAM;
 
@@ -113,12 +115,10 @@ public final class UseCaseDiagramGenerator {
                              Map<String, IActor> actorElements) {
         int i = 0;
         for (Actor actorDto : model.actors) {
-            // Step 1-2: elemento di modello
             IActor actorModel = IModelElementFactory.instance().createActor();
             actorModel.setName(actorDto.name);
             actorModel.setDescription(actorDto.description);
 
-            // Step 3-4: shape sul diagramma
             IActorUIModel actorShape =
                     (IActorUIModel) diagramManager.createDiagramElement(diagram, actorModel);
             actorShape.setBounds(ACTOR_X, ACTOR_Y_START + i * ACTOR_Y_STEP, ACTOR_W, ACTOR_H);
@@ -157,15 +157,14 @@ public final class UseCaseDiagramGenerator {
 
     /**
      * Costruisce il testo che finira' nel campo Description/Documentation
-     * dello Use Case. Include lo scenario, le eccezioni e, soprattutto, la
-     * scomposizione in Processi Funzionali COSMIC: questo e' cio' che in
-     * futuro il COSMIC Analyzer (component 2 del CosMet, si veda il paper)
-     * potra' rileggere per completare Data Movement / Data Group / Object of
-     * Interest, senza dover ripartire dal solo testo del requisito.
+     * dello Use Case. Include lo scenario, le eccezioni e la scomposizione
+     * in Processi Funzionali COSMIC: questo e' cio' che in futuro il
+     * COSMIC Analyzer (component 2 del CosMet, si veda il paper) dovra'
+     * poter leggere/aggiornare senza cambiare schema.
      */
     private String buildDescription(UseCase uc) {
         StringBuilder sb = new StringBuilder();
-        sb.append(uc.specification).append("\n\n");
+        sb.append(uc.specification == null ? "" : uc.specification).append("\n\n");
 
         sb.append("MAIN SCENARIO:\n");
         int step = 1;
@@ -239,24 +238,17 @@ public final class UseCaseDiagramGenerator {
         for (UseCase ucDto : model.useCases) {
             IUseCase baseModel = useCaseElements.get(ucDto.id);
             IUseCaseUIModel baseShape = useCaseShapes.get(ucDto.id);
-            if (baseModel == null) continue;
-
-            if (ucDto.includesIds.isEmpty()) {
-                continue; // nessuna relazione include da tracciare per questo UC
+            if (baseModel == null || ucDto.includesIds.isEmpty()) {
+                continue;
             }
 
             for (String includedId : ucDto.includesIds) {
-                ApplicationManager.instance().getViewManager().showMessage(
-                        "[COSMIC AI][DEBUG] Tentativo <<include>> da '" + ucDto.id
-                                + "' verso '" + includedId + "'...");
-
                 IUseCase includedModel = useCaseElements.get(includedId);
                 IUseCaseUIModel includedShape = useCaseShapes.get(includedId);
                 if (includedModel == null || includedShape == null) {
-                    ApplicationManager.instance().getViewManager().showMessage(
-                            "[COSMIC AI][DEBUG] SALTATO: '" + includedId
-                                    + "' non trovato tra gli Use Case disegnati "
-                                    + "(controlla che l'id combaci esattamente con lo 'id' di un altro useCase nel JSON).");
+                    logSink.accept("<<include>> SALTATO: '" + includedId
+                            + "' non trovato tra gli Use Case disegnati (controlla che l'id combaci "
+                            + "esattamente con lo 'id' di un altro useCase nel JSON).");
                     continue;
                 }
 
@@ -268,9 +260,6 @@ public final class UseCaseDiagramGenerator {
 
                 diagramManager.createConnector(
                         diagram, includeModel, (IDiagramElement) baseShape, (IDiagramElement) includedShape, null);
-
-                ApplicationManager.instance().getViewManager().showMessage(
-                        "[COSMIC AI][DEBUG] <<include>> da '" + ucDto.id + "' a '" + includedId + "' -> Fatto.");
             }
         }
     }
@@ -285,24 +274,17 @@ public final class UseCaseDiagramGenerator {
         for (UseCase ucDto : model.useCases) {
             IUseCase extensionModel = useCaseElements.get(ucDto.id);
             IUseCaseUIModel extensionShape = useCaseShapes.get(ucDto.id);
-            if (extensionModel == null) continue;
-
-            if (ucDto.extendsList.isEmpty()) {
-                continue; // nessuna relazione extend da tracciare per questo UC
+            if (extensionModel == null || ucDto.extendsList.isEmpty()) {
+                continue;
             }
 
             for (ExtendRelation ext : ucDto.extendsList) {
-                ApplicationManager.instance().getViewManager().showMessage(
-                        "[COSMIC AI][DEBUG] Tentativo <<extend>> da '" + ucDto.id
-                                + "' verso '" + ext.targetId + "' (extension point: '" + ext.extensionPoint + "')...");
-
                 IUseCase baseModel = useCaseElements.get(ext.targetId);
                 IUseCaseUIModel baseShape = useCaseShapes.get(ext.targetId);
                 if (baseModel == null || baseShape == null) {
-                    ApplicationManager.instance().getViewManager().showMessage(
-                            "[COSMIC AI][DEBUG] SALTATO: targetId '" + ext.targetId
-                                    + "' non trovato tra gli Use Case disegnati "
-                                    + "(controlla che l'id combaci esattamente con lo 'id' di un altro useCase nel JSON).");
+                    logSink.accept("<<extend>> SALTATO: targetId '" + ext.targetId
+                            + "' non trovato tra gli Use Case disegnati (controlla che l'id combaci "
+                            + "esattamente con lo 'id' di un altro useCase nel JSON).");
                     continue;
                 }
 
@@ -320,9 +302,6 @@ public final class UseCaseDiagramGenerator {
 
                 diagramManager.createConnector(
                         diagram, extendModel, (IDiagramElement) extensionShape, (IDiagramElement) baseShape, null);
-
-                ApplicationManager.instance().getViewManager().showMessage(
-                        "[COSMIC AI][DEBUG] <<extend>> da '" + ucDto.id + "' a '" + ext.targetId + "' -> Fatto.");
             }
         }
     }

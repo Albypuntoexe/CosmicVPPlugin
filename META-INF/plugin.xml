@@ -1,38 +1,73 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+    COSMIC AI - plugin.xml (riscritto)
+
+    DECISIONI ARCHITETTURALI (motivazione, per chi mantiene questo file):
+
+    1) NIENTE Message Pane component, NIENTE toolbar custom, NIENTE
+       DropTarget/scorciatoia da tastiera globale. Tutti questi meccanismi
+       sono stati rimossi dal lato Java (si veda CosmicPlugin.java): erano
+       la causa reale dell'interfaccia "morta" (framework di docking di VP
+       che intercetta gli eventi prima del nostro componente). L'unico punto
+       di ingresso ufficiale, documentato e stabile per una UI custom
+       interattiva e' ViewManager.showDialog(IDialogHandler) - si veda
+       CosmicAnalyzerDialogHandler.java.
+
+    2) Un solo <actionSet> con una sola <action> (menu "Tools"), un solo
+       <contextSensitiveActionSet> con una sola <action> (popup menu). Nel
+       codice precedente esistevano 3 Action Controller quasi identici
+       (2 wired in XML, 1 mai referenziato): superficie di errore inutile.
+       Qui restano 2 controller, ciascuno con una sola responsabilita'.
+
+    3) menuPath="Tools" e' la sintassi documentata per agganciare una voce
+       DIRETTAMENTE sotto un menu di primo livello gia' esistente (qui:
+       "Tools"), senza dover indovinare/creare sotto-menu. Per il context
+       menu, menuPath="#" e' il token documentato per "in testa al menu": e'
+       l'unica posizione GARANTITA di esistere in qualunque popup menu, a
+       differenza di un'ancora testuale su una voce che potrebbe non esserci
+       in tutti i contesti (diagramma vuoto vs. shape selezionata).
+-->
 <plugin id="com.cosmic.vpplugin"
         name="Cosmic AI Estimation Tool"
         description="Plugin per l'integrazione di LLM e il calcolo dinamico dei Function Point COSMIC"
         provider="Alberto"
         class="com.cosmic.vpplugin.CosmicPlugin">
 
-    <!-- ECCO IL FIX CRUCIALE: percorso esatto e nome esatto del tuo JAR -->
     <runtime>
         <library path="lib/CosmicVPPlugin.jar" relativePath="true"/>
     </runtime>
 
     <actionSets>
-        <!-- Menu Tools -->
+
+        <!-- ================= Voce di menu (Tools) ================= -->
         <actionSet id="com.cosmic.vpplugin.actions.MainActionSet">
-            <toolbar id="com.cosmic.vpplugin.actions.Toolbar1" orientation="north" index="new"/>
-            <action id="com.cosmic.vpplugin.actions.OpenAnalyzerPane"
+            <action id="com.cosmic.vpplugin.actions.OpenAnalyzer"
                     actionType="generalAction"
                     label="COSMIC AI Analyzer..."
-                    tooltip="Apri il pannello COSMIC AI per l'import dei requisiti e la generazione del diagramma"
+                    tooltip="Apri il pannello COSMIC AI per l'analisi dei requisiti e il calcolo dei Function Point"
                     style="normal"
-                    menuPath="Tools/#"
-                    toolbarPath="com.cosmic.vpplugin.actions.Toolbar1/#">
-                <actionController class="com.cosmic.vpplugin.action.CosmicOpenPanelActionController"/>
+                    menuPath="Tools">
+                <actionController class="com.cosmic.vpplugin.action.CosmicOpenAnalyzerActionController"/>
             </action>
         </actionSet>
 
-        <!-- Menu Contestuale (Tasto Destro) -->
+        <!-- ============ Voce di menu contestuale (tasto destro) ============
+             contextTypes all="true": l'azione viene VALUTATA per qualsiasi
+             popup menu (diagramma, shape, albero dei modelli...), ma
+             l'abilitazione VERA e propria e' decisa in Java dentro
+             CosmicDiagramContextActionController.update(...), che la
+             abilita SOLO se il contesto e' un Use Case Diagram. E'
+             esattamente il pattern raccomandato dalla guida ufficiale
+             ("developer can set the properties of the action before it is
+             shown, e.g. enable/disable the menu item"). -->
         <contextSensitiveActionSet id="com.cosmic.vpplugin.actions.DiagramPopupActionSet">
             <contextTypes all="true"/>
-            <action id="com.cosmic.vpplugin.actions.OpenAnalyzerPaneContext"
-                    label="Apri COSMIC AI Analyzer"
+            <action id="com.cosmic.vpplugin.actions.OpenAnalyzerContext"
+                    label="COSMIC AI Analyzer..."
                     menuPath="#">
-                <actionController class="com.cosmic.vpplugin.action.CosmicOpenPanelContextActionController"/>
+                <actionController class="com.cosmic.vpplugin.action.CosmicDiagramContextActionController"/>
             </action>
         </contextSensitiveActionSet>
+
     </actionSets>
 </plugin>

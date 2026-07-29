@@ -1,6 +1,5 @@
 package com.cosmic.vpplugin.listener;
 
-import com.vp.plugin.diagram.IDiagramListener;
 import com.vp.plugin.diagram.IDiagramUIModel;
 import com.vp.plugin.model.IModelElement;
 import com.vp.plugin.model.IProject;
