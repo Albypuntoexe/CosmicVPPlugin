@@ -53,7 +53,7 @@ public final class CosmicAiService {
     // dentro il pannello Swing, il che non aveva senso per una classe UI).
     // ------------------------------------------------------------------
 
-    private static final String LLM_ENDPOINT_URL = "http://192.168.4.62:2345/v1/chat/completions";
+    private static final String LLM_ENDPOINT_URL = "http://localhost:1234/v1/chat/completions";
     private static final String LLM_MODEL = "openai/gpt-oss-20b";
     private static final Duration LLM_REQUEST_TIMEOUT = Duration.ofSeconds(120);
 
