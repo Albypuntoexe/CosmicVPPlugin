@@ -2,14 +2,22 @@ package com.cosmic.vpplugin.service;
 
 import com.cosmic.vpplugin.calculator.CosmicCalculator;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.CosmicReport;
+import com.cosmic.vpplugin.calculator.CosmicCalculator.UseCaseReport;
 import com.cosmic.vpplugin.generator.UseCaseDiagramGenerator;
 import com.cosmic.vpplugin.json.MiniJsonParser;
 import com.cosmic.vpplugin.listener.CosmicModelChangeListener;
 import com.cosmic.vpplugin.model.CosmicJsonMapper;
 import com.cosmic.vpplugin.model.CosmicJsonModel;
+import com.cosmic.vpplugin.model.CosmicJsonModel.Actor;
+import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalProcess;
+import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
 
 import com.vp.plugin.ApplicationManager;
+import com.vp.plugin.model.IActor;
+import com.vp.plugin.model.IAssociation;
+import com.vp.plugin.model.IModelElement;
 import com.vp.plugin.model.IProject;
+import com.vp.plugin.model.IUseCase;
 
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
@@ -22,6 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
@@ -34,11 +43,21 @@ import java.util.function.Consumer;
  *
  * Ciclo di vita: un'unica istanza per l'intera durata del plugin, creata in
  * {@link com.cosmic.vpplugin.CosmicPlugin#loaded} e fermata in
- * {@link com.cosmic.vpplugin.CosmicPlugin#unloaded}. Il dialog di analisi
- * (view "usa e getta", apribile e richiudibile a piacere) si registra come
- * listener SOLO mentre e' visibile: il Service invece vive sempre, cosi' il
- * futuro ricalcolo automatico o l'assistente di chat potranno agganciarsi
- * senza dover ri-orchestrare le chiamate HTTP o i listener di progetto.
+ * {@link com.cosmic.vpplugin.CosmicPlugin#unloaded}.
+ *
+ * NOVITA' di questa revisione:
+ *  - Endpoint LLM aggiornato al tunnel LM Link locale.
+ *  - Memoria dell'ultima analisi ({@link #currentModel}, {@link #lastReport},
+ *    {@link #lastRequirementsText}) condivisa da chat, validazione e
+ *    ricalcolo in tempo reale (si vedano rispettivamente
+ *    {@link #sendChatMessage}, {@link #validateModelAgainstRequirements},
+ *    {@link #handleModelElementAdded}/{@link #handleModelElementRemoved}).
+ *  - Un "UI listener attivo" ({@link #setActiveUiListener}/
+ *    {@link #clearActiveUiListener}), agganciato dal dialog mentre e'
+ *    visibile: e' il canale con cui il ricalcolo scattato da una modifica
+ *    manuale del diagramma torna a farsi vedere nella UI (cfpLabel/log),
+ *    riusando l'esistente {@code onAnalysisCompleted(model, report)} senza
+ *    dover toccare l'interfaccia {@link CosmicAnalysisListener}.
  */
 public final class CosmicAiService {
 
@@ -49,43 +68,54 @@ public final class CosmicAiService {
     }
 
     // ------------------------------------------------------------------
-    // Configurazione LLM (unica fonte di verita': prima era duplicata
-    // dentro il pannello Swing, il che non aveva senso per una classe UI).
+    // Configurazione LLM
     // ------------------------------------------------------------------
 
     private static final String LLM_ENDPOINT_URL = "http://localhost:1234/v1/chat/completions";
     private static final String LLM_MODEL = "openai/gpt-oss-20b";
     private static final Duration LLM_REQUEST_TIMEOUT = Duration.ofSeconds(120);
 
-    /**
-     * Intervallo del "project watcher" (si veda {@link #startProjectWatcher()}).
-     * Un javax.swing.Timer gira SEMPRE sull'EDT: nessun rischio di
-     * concorrenza con l'Open API di Visual Paradigm, che non e' garantita
-     * thread-safe fuori dall'EDT.
-     */
     private static final int PROJECT_WATCHER_INTERVAL_MS = 1500;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(15))
             .build();
 
-    /**
-     * Un solo worker thread, dedicato, daemon: le richieste all'LLM vengono
-     * serializzate (un modello locale da 20B non trae comunque beneficio da
-     * chiamate concorrenti sull'hardware universitario) e non impediscono
-     * la chiusura della JVM host se il plugin viene scaricato senza arresto
-     * esplicito.
-     */
     private ExecutorService executor;
 
-    /** Riferimento al progetto attualmente agganciato dal listener di modello (null se nessuno). */
     private IProject watchedProject;
 
     private final CosmicModelChangeListener modelChangeListener = new CosmicModelChangeListener();
 
     private Timer projectWatcherTimer;
 
+    // ------------------------------------------------------------------
+    // Memoria dell'ultima analisi (Task 2/3/4)
+    // ------------------------------------------------------------------
+
+    /**
+     * Modello "vivo": e' sia il risultato dell'ultima analisi LLM sia,
+     * dopo, l'immagine mantenuta sincronizzata con le modifiche manuali
+     * dell'utente sul diagramma (si veda {@link #handleModelElementAdded}).
+     * Null finche' nessuna analisi e' mai andata a buon fine.
+     */
+    private CosmicJsonModel currentModel;
+
+    /** Ultimo report COSMIC calcolato su {@link #currentModel} (LLM o ricalcolo manuale). */
+    private CosmicReport lastReport;
+
+    /** Testo dei requisiti originali usato per generare {@link #currentModel} (serve alla validazione, Task 3). */
+    private String lastRequirementsText;
+
+    /** Listener della UI attualmente visibile, se presente: riceve gli aggiornamenti del ricalcolo in tempo reale. */
+    private volatile CosmicAnalysisListener activeUiListener;
+
     private CosmicAiService() {
+        // Collega il listener di modello al Service: da qui in avanti ogni
+        // IUseCase/IAssociation aggiunto o rimosso a mano dall'utente passa
+        // da qui (Task 4).
+        modelChangeListener.setOnModelAdded(this::handleModelElementAdded);
+        modelChangeListener.setOnModelRemoved(this::handleModelElementRemoved);
     }
 
     // ------------------------------------------------------------------
@@ -113,25 +143,18 @@ public final class CosmicAiService {
         }
     }
 
-    /**
-     * FIX rispetto alla versione precedente: il vecchio codice agganciava i
-     * listener di modello UNA sola volta, dentro {@code CosmicPlugin.loaded()}.
-     * Se il plugin viene caricato all'avvio di Visual Paradigm PRIMA che
-     * l'utente apra o crei un progetto (il caso comune), {@code getProject()}
-     * restituiva null e i listener non venivano mai agganciati: aprire un
-     * progetto in seguito non ri-innescava alcun aggancio (i callback
-     * projectOpened/projectNewed di IProjectListener servono a nulla se non
-     * si e' GIA' in ascolto di qualcosa).
-     *
-     * La soluzione adottata qui e' un polling leggero, sempre sull'EDT, che
-     * confronta il riferimento al progetto corrente: se e' cambiato (nessun
-     * progetto -> progetto aperto, oppure cambio di progetto), i listener
-     * vengono staccati dal vecchio progetto (se presente) e agganciati al
-     * nuovo. Questo e' il punto di aggancio concreto per la Predisposizione
-     * Futura al ricalcolo in tempo reale: da qui in avanti
-     * {@link #modelChangeListener} riceve davvero tutti gli eventi, in ogni
-     * scenario di apertura/cambio progetto.
-     */
+    /** Registra il dialog corrente come destinatario degli aggiornamenti "live" (chiamato da shown()). */
+    public void setActiveUiListener(CosmicAnalysisListener listener) {
+        this.activeUiListener = listener;
+    }
+
+    /** Deregistra il dialog (chiamato da canClosed()): evita di notificare una UI ormai chiusa. */
+    public void clearActiveUiListener(CosmicAnalysisListener listener) {
+        if (this.activeUiListener == listener) {
+            this.activeUiListener = null;
+        }
+    }
+
     private void startProjectWatcher() {
         projectWatcherTimer = new Timer(PROJECT_WATCHER_INTERVAL_MS, e -> {
             IProject currentProject = ApplicationManager.instance().getProjectManager().getProject();
@@ -175,11 +198,6 @@ public final class CosmicAiService {
     // Pipeline principale: testo requisiti -> LLM -> diagramma + CFP
     // ------------------------------------------------------------------
 
-    /**
-     * Avvia l'intera pipeline in modo asincrono. Puo' essere chiamato SOLO
-     * dall'EDT (e' li' che vive normalmente un click di bottone); il
-     * {@link CosmicAnalysisListener} viene sempre richiamato sull'EDT.
-     */
     public void analyzeRequirements(String rawRequirementsText, CosmicAnalysisListener listener) {
         if (rawRequirementsText == null || rawRequirementsText.isBlank()) {
             listener.onAnalysisFailed(new IllegalArgumentException("Nessun testo di requisiti fornito."));
@@ -190,12 +208,12 @@ public final class CosmicAiService {
 
         executor.submit(() -> {
             try {
-                String responseBody = callLlm(rawRequirementsText);
+                String responseBody = callLlm(buildCosmicSystemPrompt(), rawRequirementsText);
                 String assistantContent = extractAssistantContent(responseBody);
                 String cleanedJson = stripMarkdownFences(assistantContent);
                 SwingUtilities.invokeLater(() -> {
                     listener.onLog("Risposta LLM ricevuta (" + cleanedJson.length() + " caratteri).");
-                    runPipelineOnJson(cleanedJson, listener);
+                    runPipelineOnJson(cleanedJson, rawRequirementsText, listener);
                 });
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
@@ -206,21 +224,8 @@ public final class CosmicAiService {
         });
     }
 
-    /**
-     * Percorso "demo": salta la chiamata di rete e applica direttamente il
-     * JSON di esempio del paper CosMet ({@link com.cosmic.vpplugin.mock.MockLlmResponse}).
-     * Utile per verificare diagramma e calcolo COSMIC anche senza
-     * connettivita' verso l'LLM universitario.
-     */
-    public void analyzeWithMockData(CosmicAnalysisListener listener) {
-        listener.onBusyStateChanged(true);
-        listener.onLog("Modalita' demo: uso il JSON di esempio (nessuna chiamata di rete).");
-        // La generazione del diagramma tocca l'Open API di VP: resta sull'EDT.
-        runPipelineOnJson(com.cosmic.vpplugin.mock.MockLlmResponse.JSON, listener);
-    }
-
     /** Deve essere invocato SEMPRE sull'EDT: tocca l'Open API di Visual Paradigm. */
-    private void runPipelineOnJson(String jsonText, CosmicAnalysisListener listener) {
+    private void runPipelineOnJson(String jsonText, String originalRequirementsText, CosmicAnalysisListener listener) {
         try {
             listener.onLog("Parsing JSON e generazione diagramma in corso...");
             CosmicJsonModel model = CosmicJsonMapper.map(jsonText);
@@ -237,6 +242,12 @@ public final class CosmicAiService {
             listener.onLog(report.toText());
             listener.onLog("Misurazione completata: " + report.totalCfp + " CFP totali.");
 
+            // Aggiorna la memoria condivisa (Task 2/3/4): da qui in avanti
+            // chat, validazione e ricalcolo manuale lavorano su QUESTO modello.
+            this.currentModel = model;
+            this.lastReport = report;
+            this.lastRequirementsText = originalRequirementsText;
+
             listener.onBusyStateChanged(false);
             listener.onAnalysisCompleted(model, report);
         } catch (Exception e) {
@@ -246,16 +257,13 @@ public final class CosmicAiService {
     }
 
     // ------------------------------------------------------------------
-    // Assistente di chat (predisposizione futura): stesso client HTTP,
-    // stesso executor, nessun prompt COSMIC/JSON: risposta libera in testo.
+    // Task 2: Assistente di chat con memoria ("Suggeritore COSMIC")
     // ------------------------------------------------------------------
 
     public void sendChatMessage(String userMessage, Consumer<String> onReply, Consumer<Throwable> onError) {
         executor.submit(() -> {
             try {
-                String systemPrompt = "Sei l'assistente COSMIC AI integrato in Visual Paradigm. Rispondi in "
-                        + "modo sintetico a domande su Use Case, UML e sul metodo COSMIC (Entry/Exit/Read/Write, "
-                        + "Function Point, Data Group, Object of Interest).";
+                String systemPrompt = buildChatSuggesterSystemPrompt();
                 String requestBody = buildChatCompletionRequestJson(systemPrompt, userMessage);
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create(LLM_ENDPOINT_URL))
@@ -277,12 +285,356 @@ public final class CosmicAiService {
         });
     }
 
+    /**
+     * System prompt dell'assistente di chat. Rispetto alla versione
+     * precedente (stateless), qui:
+     *  1) l'LLM viene istruito a comportarsi da "Suggeritore COSMIC" secondo
+     *     il paper CosMet, motivando le classificazioni E/X/R/W quando
+     *     richiesto;
+     *  2) se {@link #currentModel} non e' null, viene accodato un riassunto
+     *     testuale dell'ultima analisi (Use Case, Processi Funzionali, CFP),
+     *     cosi' l'assistente puo' rispondere a domande su "quello che ha
+     *     appena generato" senza che l'utente debba ripetere il contesto.
+     */
+    private String buildChatSuggesterSystemPrompt() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Sei il 'Suggeritore COSMIC' dell'assistente COSMIC AI integrato in Visual Paradigm, ")
+          .append("basato sul metodo descritto nel paper CosMet (De Vito et al.). Il tuo compito e' ")
+          .append("aiutare l'utente a capire e verificare la misurazione COSMIC del progetto corrente.\n\n")
+          .append("Regole di classificazione dei Data Movement che devi saper spiegare quando richiesto:\n")
+          .append("- Entry (E): i dati entrano nel processo funzionale provenienti da un Functional User ")
+          .append("(es. l'utente compila e invia un form).\n")
+          .append("- Exit (X): i dati escono dal processo verso un Functional User (es. un messaggio di ")
+          .append("conferma o di errore mostrato a schermo; un Exit va contato UNA sola volta per processo ")
+          .append("anche se il messaggio puo' avere piu' varianti, es. conferma/errore).\n")
+          .append("- Read (R): i dati vengono letti dalla memoria persistente (storage) verso il processo.\n")
+          .append("- Write (W): i dati vengono scritti dal processo verso la memoria persistente.\n")
+          .append("- Un processo funzionale valido deve contenere almeno 2 CFP, tipicamente una Entry piu' ")
+          .append("una Write o una Exit.\n")
+          .append("Quando l'utente chiede 'perche' questo e' E/X/R/W', spiega la direzione del movimento dati ")
+          .append("(chi manda cosa a chi) facendo riferimento, se disponibile, al contesto del progetto sotto.\n")
+          .append("Rispondi sempre in italiano, in modo sintetico e concreto.");
+
+        String modelSummary = buildModelSummaryForPrompt();
+        if (!modelSummary.isEmpty()) {
+            sb.append("\n\n").append(modelSummary);
+        } else {
+            sb.append("\n\nNota: nessuna analisi e' ancora stata eseguita in questa sessione: se l'utente fa ")
+              .append("domande sul progetto, invitalo a eseguire prima un'analisi dal pannello.");
+        }
+        return sb.toString();
+    }
+
+    /** Riassunto testuale di {@link #currentModel}/{@link #lastReport}, riusato da chat e log. */
+    private String buildModelSummaryForPrompt() {
+        if (currentModel == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("CONTESTO ATTUALE - progetto '").append(currentModel.projectName).append("':\n");
+        for (UseCase uc : currentModel.useCases) {
+            UseCaseReport ucReport = findUseCaseReport(uc.id);
+            sb.append("- Use Case [").append(uc.id).append("] ").append(uc.name);
+            if (ucReport != null) {
+                sb.append(" -> ").append(ucReport.totalCfp).append(" CFP totali");
+            }
+            sb.append("\n");
+            for (FunctionalProcess fp : uc.functionalProcesses) {
+                sb.append("    * FP [").append(fp.fpId).append("] ").append(fp.fpName).append("\n");
+            }
+        }
+        if (lastReport != null) {
+            sb.append("TOTALE PROGETTO: ").append(lastReport.totalCfp).append(" CFP.\n");
+        }
+        return sb.toString();
+    }
+
+    private UseCaseReport findUseCaseReport(String useCaseId) {
+        if (lastReport == null || useCaseId == null) {
+            return null;
+        }
+        for (UseCaseReport r : lastReport.useCases) {
+            if (useCaseId.equals(r.id)) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    // ------------------------------------------------------------------
+    // Task 3: Validazione UML generato vs requisiti originali
+    // ------------------------------------------------------------------
+
+    public void validateModelAgainstRequirements(Consumer<String> onResult, Consumer<Throwable> onError) {
+        if (currentModel == null || lastRequirementsText == null) {
+            onError.accept(new IllegalStateException(
+                    "Nessuna analisi disponibile: esegui prima \"Analizza\" su un documento requisiti."));
+            return;
+        }
+        // Copie locali: l'utente potrebbe lanciare una nuova analisi mentre
+        // questa richiesta e' ancora in volo sul thread di background.
+        final String requirementsSnapshot = lastRequirementsText;
+        final String modelSerializationSnapshot = serializeModelForValidation(currentModel);
+
+        executor.submit(() -> {
+            try {
+                String systemPrompt = "Sei un revisore di qualita' esperto in UML Use Case e nel metodo "
+                        + "COSMIC (paper CosMet). Riceverai (1) il testo originale dei requisiti e (2) il "
+                        + "modello UML/COSMIC generato automaticamente a partire da esso. Il tuo compito e' "
+                        + "controllare se il modello generato copre TUTTI i requisiti originali, segnalando "
+                        + "in particolare: attori menzionati nel testo ma assenti nel modello, eccezioni o "
+                        + "scenari alternativi presenti nel testo ma non rappresentati, e Use Case impliciti "
+                        + "nel testo ma non generati. Rispondi in italiano con un elenco puntato conciso; se "
+                        + "non trovi discrepanze, dichiaralo esplicitamente.";
+                String userPrompt = "REQUISITI ORIGINALI:\n" + requirementsSnapshot
+                        + "\n\nMODELLO GENERATO:\n" + modelSerializationSnapshot
+                        + "\n\nEsegui il controllo di copertura richiesto.";
+
+                String requestBody = buildChatCompletionRequestJson(systemPrompt, userPrompt);
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(LLM_ENDPOINT_URL))
+                        .timeout(LLM_REQUEST_TIMEOUT)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
+                        .build();
+                HttpResponse<String> response =
+                        httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (response.statusCode() / 100 != 2) {
+                    throw new IOException("Il server LLM ha risposto con codice HTTP "
+                            + response.statusCode() + ": " + truncate(response.body(), 500));
+                }
+                String reply = extractAssistantContent(response.body());
+                SwingUtilities.invokeLater(() -> onResult.accept(reply));
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> onError.accept(ex));
+            }
+        });
+    }
+
+    /** Serializzazione testuale completa del modello, per il prompt di validazione. */
+    private String serializeModelForValidation(CosmicJsonModel model) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Progetto: ").append(model.projectName).append("\n\n");
+
+        sb.append("Attori:\n");
+        for (Actor a : model.actors) {
+            sb.append("- ").append(a.name).append(": ").append(a.description).append("\n");
+        }
+
+        sb.append("\nUse Case:\n");
+        for (UseCase uc : model.useCases) {
+            sb.append("- [").append(uc.id).append("] ").append(uc.name)
+              .append(" (attore primario: ").append(uc.primaryActorId).append(")\n");
+            sb.append("  Specifica: ").append(uc.specification).append("\n");
+            sb.append("  Scenario principale:\n");
+            for (String step : uc.mainScenario) {
+                sb.append("    - ").append(step).append("\n");
+            }
+            if (!uc.exceptions.isEmpty()) {
+                sb.append("  Eccezioni:\n");
+                for (String ex : uc.exceptions) {
+                    sb.append("    - ").append(ex).append("\n");
+                }
+            }
+            if (!uc.includesIds.isEmpty()) {
+                sb.append("  <<include>>: ").append(uc.includesIds).append("\n");
+            }
+            if (!uc.extendsList.isEmpty()) {
+                sb.append("  <<extend>> verso: ");
+                for (var ext : uc.extendsList) {
+                    sb.append(ext.targetId).append(" ");
+                }
+                sb.append("\n");
+            }
+        }
+        return sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // Task 4: Ricalcolo in tempo reale (sync bidirezionale UML -> modello)
+    // ------------------------------------------------------------------
+
+    /**
+     * Chiamato da {@link CosmicModelChangeListener} quando l'utente
+     * disegna/crea a mano un elemento sul diagramma.
+     *
+     * LIMITE NOTO (dichiarato esplicitamente, non un bug nascosto): il
+     * generatore ({@code UseCaseDiagramGenerator}) non salva una mappatura
+     * tra l'ID interno di Visual Paradigm e l'id usato nel
+     * {@link CosmicJsonModel} (quello prodotto dall'LLM). Senza poter
+     * modificare quel file, la correlazione fra un {@code IUseCase}/
+     * {@code IAssociation} di VP e la entry corrispondente nel modello e'
+     * fatta per NOME (case-insensitive, trim): solida per gli scenari
+     * richiesti (aggiunta/rimozione di base), ma un rename manuale di uno
+     * Use Case verra' trattato come "elemento nuovo" finche' questa
+     * mappatura non verra' irrobustita con ID stabili lato generatore.
+     */
+    private void handleModelElementAdded(IModelElement element) {
+        SwingUtilities.invokeLater(() -> {
+            if (currentModel == null) {
+                return; // nessuna analisi ancora in memoria: niente con cui sincronizzare
+            }
+            boolean changed = false;
+            if (element instanceof IUseCase) {
+                changed = addUseCaseIfMissing((IUseCase) element);
+            } else if (element instanceof IAssociation) {
+                changed = applyAssociation((IAssociation) element, true);
+            }
+            if (changed) {
+                recomputeAndPublish("Rilevata aggiunta manuale sul diagramma.");
+            }
+        });
+    }
+
+    private void handleModelElementRemoved(IModelElement element) {
+        SwingUtilities.invokeLater(() -> {
+            if (currentModel == null) {
+                return;
+            }
+            boolean changed = false;
+            if (element instanceof IUseCase) {
+                changed = removeUseCaseIfPresent((IUseCase) element);
+            } else if (element instanceof IAssociation) {
+                changed = applyAssociation((IAssociation) element, false);
+            }
+            if (changed) {
+                recomputeAndPublish("Rilevata rimozione manuale sul diagramma.");
+            }
+        });
+    }
+
+    private boolean addUseCaseIfMissing(IUseCase vpUseCase) {
+        String vpId = vpUseCase.getId();
+        String vpName = safeTrim(vpUseCase.getName());
+        if (vpName.isEmpty()) {
+            return false;
+        }
+        for (UseCase existing : currentModel.useCases) {
+            if (vpId.equals(existing.id) || vpName.equalsIgnoreCase(safeTrim(existing.name))) {
+                return false; // gia' presente (o e' l'eco della nostra stessa generazione)
+            }
+        }
+        UseCase newUseCase = new UseCase();
+        newUseCase.id = vpId;
+        newUseCase.name = vpUseCase.getName();
+        newUseCase.specification = "(Use Case aggiunto manualmente sul diagramma; nessun processo "
+                + "funzionale ancora definito)";
+        currentModel.useCases.add(newUseCase);
+        return true;
+    }
+
+    private boolean removeUseCaseIfPresent(IUseCase vpUseCase) {
+        String vpId = vpUseCase.getId();
+        String vpName = safeTrim(vpUseCase.getName());
+        return currentModel.useCases.removeIf(
+                uc -> vpId.equals(uc.id) || vpName.equalsIgnoreCase(safeTrim(uc.name)));
+    }
+
+    /**
+     * Applica (added=true) o rimuove (added=false) il legame Attore-Use Case
+     * rappresentato da un'associazione appena disegnata/rimossa. Copre solo
+     * il caso "un lato e' un IActor, l'altro e' un IUseCase" (associazione
+     * Attore -> Use Case primario), come richiesto dal Task 4.
+     */
+    private boolean applyAssociation(IAssociation association, boolean added) {
+        IActor actorEnd = null;
+        IUseCase useCaseEnd = null;
+        try {
+            if (association.getFrom() instanceof IActor && association.getTo() instanceof IUseCase) {
+                actorEnd = (IActor) association.getFrom();
+                useCaseEnd = (IUseCase) association.getTo();
+            } else if (association.getTo() instanceof IActor && association.getFrom() instanceof IUseCase) {
+                actorEnd = (IActor) association.getTo();
+                useCaseEnd = (IUseCase) association.getFrom();
+            }
+        } catch (Exception ex) {
+            return false; // elemento gia' scollegato dal modello (rimozione avanzata): nulla da fare
+        }
+        if (actorEnd == null || useCaseEnd == null) {
+            return false; // associazione tra altri tipi di elementi: fuori scope per il Task 4
+        }
+
+        UseCase targetUseCase = findUseCaseByNameOrId(useCaseEnd);
+        if (targetUseCase == null) {
+            return false;
+        }
+
+        if (added) {
+            Actor actorDto = findOrCreateActor(actorEnd);
+            if (targetUseCase.primaryActorId == null || targetUseCase.primaryActorId.isEmpty()) {
+                targetUseCase.primaryActorId = actorDto.id;
+                return true;
+            }
+            return false;
+        } else {
+            String actorName = safeTrim(actorEnd.getName());
+            Actor linkedActor = findActorById(targetUseCase.primaryActorId);
+            if (linkedActor != null && actorName.equalsIgnoreCase(safeTrim(linkedActor.name))) {
+                targetUseCase.primaryActorId = null;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    private UseCase findUseCaseByNameOrId(IUseCase vpUseCase) {
+        String vpId = vpUseCase.getId();
+        String vpName = safeTrim(vpUseCase.getName());
+        for (UseCase uc : currentModel.useCases) {
+            if (vpId.equals(uc.id) || vpName.equalsIgnoreCase(safeTrim(uc.name))) {
+                return uc;
+            }
+        }
+        return null;
+    }
+
+    private Actor findOrCreateActor(IActor vpActor) {
+        String vpName = safeTrim(vpActor.getName());
+        for (Actor a : currentModel.actors) {
+            if (vpName.equalsIgnoreCase(safeTrim(a.name))) {
+                return a;
+            }
+        }
+        Actor newActor = new Actor();
+        newActor.id = "actor_" + UUID.randomUUID();
+        newActor.name = vpActor.getName();
+        newActor.description = "(Attore aggiunto manualmente sul diagramma)";
+        currentModel.actors.add(newActor);
+        return newActor;
+    }
+
+    private Actor findActorById(String actorId) {
+        if (actorId == null) {
+            return null;
+        }
+        for (Actor a : currentModel.actors) {
+            if (actorId.equals(a.id)) {
+                return a;
+            }
+        }
+        return null;
+    }
+
+    private void recomputeAndPublish(String reason) {
+        CosmicReport report = new CosmicCalculator().compute(currentModel);
+        this.lastReport = report;
+        CosmicAnalysisListener listener = this.activeUiListener;
+        if (listener != null) {
+            listener.onLog(reason + " Ricalcolo COSMIC eseguito: " + report.totalCfp + " CFP totali.");
+            listener.onAnalysisCompleted(currentModel, report);
+        }
+    }
+
+    private String safeTrim(String s) {
+        return s == null ? "" : s.trim();
+    }
+
     // ------------------------------------------------------------------
     // Plumbing HTTP/JSON per l'endpoint "chat completions"
     // ------------------------------------------------------------------
 
-    private String callLlm(String requirementsText) throws IOException, InterruptedException {
-        String requestBody = buildChatCompletionRequestJson(buildCosmicSystemPrompt(), requirementsText);
+    private String callLlm(String systemPrompt, String userText) throws IOException, InterruptedException {
+        String requestBody = buildChatCompletionRequestJson(systemPrompt, userText);
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(LLM_ENDPOINT_URL))

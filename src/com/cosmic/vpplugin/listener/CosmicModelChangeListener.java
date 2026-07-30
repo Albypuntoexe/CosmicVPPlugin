@@ -7,26 +7,42 @@ import com.vp.plugin.model.IProjectDiagramListener;
 import com.vp.plugin.model.IProjectListener;
 import com.vp.plugin.model.IProjectModelListener;
 
+import java.util.function.Consumer;
+
 /**
- * Fase 4 (fondamenta) - Infrastruttura di ascolto per il ricalcolo COSMIC
- * in tempo reale.
+ * Infrastruttura di ascolto per il ricalcolo COSMIC in tempo reale.
  *
- * QUESTA CLASSE NON RICALCOLA ANCORA NULLA: ogni metodo si limita a
- * loggare l'evento intercettato (per verificare che l'aggancio funzioni) e
- * contiene un commento "TODO" che descrive la logica prevista per il
- * prossimo step.
+ * AGGIORNAMENTO (Task 4 - sync bidirezionale): {@code modelAdded} e
+ * {@code modelRemoved} ora, oltre a loggare come prima, invocano un
+ * callback esterno ({@link #onModelAdded}/{@link #onModelRemoved}),
+ * impostato da {@link com.cosmic.vpplugin.service.CosmicAiService} nel suo
+ * costruttore. Questa classe resta comunque riusabile "a se stante": se
+ * nessuno imposta i callback, il comportamento e' identico a prima (solo
+ * logging), grazie ai no-op di default.
+ *
+ * Gli altri eventi (progetto, diagrammi) restano solo loggati: la logica
+ * di ricalcolo richiesta dal Task 4 riguarda esplicitamente le modifiche
+ * agli elementi di modello (Use Case, Associazioni, ecc.), non l'apertura
+ * di progetti o diagrammi.
  */
 public class CosmicModelChangeListener implements IProjectListener, IProjectDiagramListener, IProjectModelListener {
 
-    /**
-     * Nota di riferimento (non un vero campo/metodo invocabile): per gli
-     * eventi su un singolo IModelElement (es. rinomina di uno specifico Use
-     * Case, cambio di un suo attributo) andra' usato in futuro
-     * {@code modelElement.addPropertyChangeListener(PropertyChangeListener)},
-     * non un'interfaccia di questo package.
-     */
     private static final String TODO_PROPERTY_CHANGE_NOTE =
             "IModelElement.addPropertyChangeListener(...) per eventi sul singolo elemento";
+
+    /** Invocato quando un elemento di modello viene aggiunto al progetto. No-op di default. */
+    private Consumer<IModelElement> onModelAdded = element -> { };
+
+    /** Invocato quando un elemento di modello viene rimosso dal progetto. No-op di default. */
+    private Consumer<IModelElement> onModelRemoved = element -> { };
+
+    public void setOnModelAdded(Consumer<IModelElement> onModelAdded) {
+        this.onModelAdded = (onModelAdded != null) ? onModelAdded : (element -> { });
+    }
+
+    public void setOnModelRemoved(Consumer<IModelElement> onModelRemoved) {
+        this.onModelRemoved = (onModelRemoved != null) ? onModelRemoved : (element -> { });
+    }
 
     // ==================================================================
     // IProjectListener - eventi sul progetto
@@ -35,27 +51,21 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
     @Override
     public void projectNewed(IProject project) {
         log("Progetto creato: " + safeName(project));
-        // TODO (prossimo step): eventualmente ri-agganciare qui i listener
-        // di diagramma/modello se non gia' fatto da CosmicPlugin.
     }
 
     @Override
     public void projectOpened(IProject project) {
         log("Progetto aperto: " + safeName(project));
-        // TODO (prossimo step): ricalcolare da zero i CFP di tutti i
-        // diagrammi del progetto appena aperto (baseline iniziale).
     }
 
     @Override
     public void projectAfterOpened(IProject project) {
         log("Progetto post-apertura completata: " + safeName(project));
-        // Aggiunto per soddisfare l'interfaccia IProjectListener.
     }
 
     @Override
     public void projectRenamed(IProject project) {
         log("Progetto rinominato: " + safeName(project));
-        // Nessun impatto previsto sul calcolo COSMIC.
     }
 
     @Override
@@ -65,8 +75,7 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
 
     @Override
     public void projectSaved(IProject project) {
-        // TODO (prossimo step): eventuale persistenza del report COSMIC
-        // calcolato (es. accanto al file .vpp) al momento del salvataggio.
+        // Nessuna azione prevista in questa fase.
     }
 
     // ==================================================================
@@ -76,13 +85,11 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
     @Override
     public void diagramAdded(IProject project, IDiagramUIModel diagram) {
         log("Diagramma aggiunto al progetto: " + safeName(diagram));
-        // TODO (prossimo step): registrare IDiagramListener dedicato e ricalcolare.
     }
 
     @Override
     public void diagramRemoved(IProject project, IDiagramUIModel diagram) {
         log("Diagramma rimosso dal progetto: " + safeName(diagram));
-        // TODO (prossimo step): rimuovere il contributo di questo diagramma dal totale.
     }
 
     // ==================================================================
@@ -92,13 +99,13 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
     @Override
     public void modelAdded(IProject project, IModelElement model) {
         log("Modello aggiunto al progetto: " + safeName(model) + " (tipo: " + safeType(model) + ")");
-        // TODO (prossimo step): aggiornare modello interno e ricalcolare.
+        onModelAdded.accept(model);
     }
 
     @Override
     public void modelRemoved(IProject project, IModelElement model) {
         log("Modello rimosso dal progetto: " + safeName(model) + " (tipo: " + safeType(model) + ")");
-        // TODO (prossimo step): simmetrico a modelAdded.
+        onModelRemoved.accept(model);
     }
 
     // ==================================================================

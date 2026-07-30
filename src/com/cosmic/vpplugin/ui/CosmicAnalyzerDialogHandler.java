@@ -23,6 +23,7 @@ import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
+import java.awt.FlowLayout;
 import java.awt.Font;
 import java.io.File;
 import java.io.IOException;
@@ -35,31 +36,26 @@ import java.util.Date;
  * UI ufficiale di COSMIC AI: implementa {@link IDialogHandler}, l'unica via
  * documentata da Visual Paradigm per mostrare una finestra Swing custom in
  * modo garantito funzionante sia in installazione standalone sia sotto IDE
- * Integration (si veda "Showing custom dialog" nella Plug-in User's Guide
- * ufficiale). A differenza del precedente pannello iniettato nel Message
- * Pane, qui il ciclo di vita della finestra (apertura, focus, chiusura,
- * modalita') e' gestito NATIVAMENTE da Visual Paradigm: nessun framework di
- * docking di terze parti puo' intercettare gli eventi prima di noi.
+ * Integration. Il ciclo di vita della finestra (apertura, focus, chiusura,
+ * modalita') e' gestito NATIVAMENTE da Visual Paradigm.
  *
- * Scelte di design:
- *  - Dialog NON modale: l'utente deve poter continuare a lavorare sul
- *    diagramma mentre l'LLM risponde (la chiamata di rete puo' durare fino
- *    a LLM_REQUEST_TIMEOUT) e, in previsione del ricalcolo in tempo reale
- *    futuro, la finestra deve poter restare aperta accanto all'editor.
- *  - Nessun DropTarget/Drag&Drop: rimosso per intero. L'unica via di
- *    caricamento file e' il file chooser ufficiale
- *    {@code ViewManager.createJFileChooser()}, esplicitamente raccomandato
- *    dalla documentazione VP al posto di {@code new JFileChooser()} perche'
- *    un JFileChooser "nudo" puo' comportarsi in modo imprevedibile quando
- *    Visual Paradigm e' eseguito dentro un IDE host non-Swing (SDE).
- *  - Singleton "soft": {@link #openOrNotify()} evita di aprire due dialog
- *    sovrapposti se l'utente clicca due volte (da menu e da context menu).
+ * NOVITA' di questa revisione:
+ *  - Rimosso il percorso "Demo senza rete" (Task 1): non serve piu', la
+ *    connettivita' verso l'LLM e' stabile tramite il tunnel LM Link.
+ *  - Aggiunto un pulsante "Valida Modello vs Requisiti" nella tab
+ *    Assistente (Task 3): richiama {@code CosmicAiService.validateModelAgainstRequirements}
+ *    e stampa l'esito nella stessa {@code chatArea} usata dalla chat.
+ *  - Il dialog si registra/deregistra come "UI listener attivo" del
+ *    Service in {@link #shown()}/{@link #canClosed()} (Task 4): mentre e'
+ *    aperto, riceve anche gli aggiornamenti scatenati da modifiche manuali
+ *    al diagramma (nuovo Use Case disegnato, associazione rimossa, ...),
+ *    tramite lo stesso {@code onAnalysisCompleted} usato per l'analisi LLM.
  */
 public final class CosmicAnalyzerDialogHandler implements IDialogHandler, CosmicAnalysisListener {
 
     private static volatile boolean OPEN = false;
 
-    /** Punto di ingresso unico, usato da entrambi gli Action Controller. */
+    /** Punto di ingresso unico, usato dalla scorciatoia da tastiera globale. */
     public static void openOrNotify() {
         if (OPEN) {
             ApplicationManager.instance().getViewManager()
@@ -77,15 +73,15 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
     private final JTextArea logArea = new JTextArea();
     private final JButton chooseFileButton = new JButton("Seleziona file requisiti (.txt / .json)...");
     private final JButton analyzeButton = new JButton("Analizza (invia al modello COSMIC AI)");
-    private final JButton demoButton = new JButton("Demo senza rete (esempio CosMet)");
     private final JLabel statusLabel = new JLabel("Nessun file caricato.");
     private final JLabel cfpLabel = new JLabel(" ");
     private final JProgressBar progressBar = new JProgressBar();
 
-    // Tab "Assistente" (predisposizione futura, gia' funzionante)
+    // Tab "Assistente"
     private final JTextArea chatArea = new JTextArea();
     private final JTextField chatInput = new JTextField();
     private final JButton chatSendButton = new JButton("Invia");
+    private final JButton validateButton = new JButton("Valida Modello vs Requisiti");
 
     // ------------------------------------------------------------------
     // IDialogHandler
@@ -111,13 +107,20 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
 
     @Override
     public void shown() {
-        log("Pannello pronto. Seleziona un file dei requisiti oppure premi \"Demo\" per un esempio "
-                + "pre-caricato, poi premi \"Analizza\".");
+        // Task 4: da questo momento il Service puo' notificarci i ricalcoli
+        // scatenati da modifiche manuali al diagramma.
+        CosmicAiService.getInstance().setActiveUiListener(this);
+        log("Pannello pronto. Seleziona un file dei requisiti, poi premi \"Analizza\".");
     }
 
     @Override
     public boolean canClosed() {
         OPEN = false;
+        // Task 4: da qui in poi il dialog non esiste piu' come UI: il
+        // Service continua a tenere in memoria il modello e a ricalcolare
+        // in background, ma non deve piu' provare ad aggiornare componenti
+        // Swing di questa finestra.
+        CosmicAiService.getInstance().clearActiveUiListener(this);
         return true;
     }
 
@@ -140,10 +143,8 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         JPanel actionsRow = new JPanel(new BorderLayout(6, 0));
         analyzeButton.setEnabled(false);
         analyzeButton.addActionListener(e -> onAnalyzeClicked());
-        demoButton.addActionListener(e -> onDemoClicked());
-        JPanel buttons = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 0));
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         buttons.add(analyzeButton);
-        buttons.add(demoButton);
         actionsRow.add(buttons, BorderLayout.WEST);
         progressBar.setIndeterminate(true);
         progressBar.setVisible(false);
@@ -176,15 +177,24 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         chatArea.setWrapStyleWord(true);
         JScrollPane chatScroll = new JScrollPane(chatArea);
         chatScroll.setBorder(BorderFactory.createTitledBorder(
-                "Chiedi informazioni su Use Case / COSMIC (stesso modello configurato per l'analisi)"));
+                "Suggeritore COSMIC - chiedi informazioni sull'ultima analisi o sul metodo COSMIC"));
         root.add(chatScroll, BorderLayout.CENTER);
+
+        JPanel south = new JPanel(new BorderLayout(6, 6));
+
+        JPanel validateRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        validateButton.addActionListener(e -> onValidateClicked());
+        validateRow.add(validateButton);
+        south.add(validateRow, BorderLayout.NORTH);
 
         JPanel inputRow = new JPanel(new BorderLayout(6, 0));
         chatInput.addActionListener(e -> onSendChatClicked());
         chatSendButton.addActionListener(e -> onSendChatClicked());
         inputRow.add(chatInput, BorderLayout.CENTER);
         inputRow.add(chatSendButton, BorderLayout.EAST);
-        root.add(inputRow, BorderLayout.SOUTH);
+        south.add(inputRow, BorderLayout.SOUTH);
+
+        root.add(south, BorderLayout.SOUTH);
 
         return root;
     }
@@ -194,11 +204,6 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
     // ------------------------------------------------------------------
 
     private void onChooseFileClicked() {
-        // ViewManager.createJFileChooser() e' la via raccomandata dalla
-        // documentazione ufficiale VP al posto di "new JFileChooser()":
-        // garantisce comportamento corretto anche quando Visual Paradigm
-        // e' eseguito dentro un IDE host che non e' un'applicazione Swing
-        // pura (es. integrazioni SDE su Eclipse/Visual Studio).
         JFileChooser chooser = ApplicationManager.instance().getViewManager().createJFileChooser();
         chooser.setDialogTitle("Seleziona il file dei requisiti");
         chooser.setFileFilter(new FileNameExtensionFilter("Requisiti (*.json, *.txt)", "json", "txt"));
@@ -252,10 +257,6 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         CosmicAiService.getInstance().analyzeRequirements(pendingRequirementsText, this);
     }
 
-    private void onDemoClicked() {
-        CosmicAiService.getInstance().analyzeWithMockData(this);
-    }
-
     private void onSendChatClicked() {
         String text = chatInput.getText().trim();
         if (text.isEmpty()) {
@@ -275,9 +276,25 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
                 });
     }
 
+    /** Task 3: chiede all'LLM di controllare la copertura del modello generato rispetto ai requisiti originali. */
+    private void onValidateClicked() {
+        validateButton.setEnabled(false);
+        chatArea.append("--- Validazione modello vs requisiti in corso... ---\n");
+        CosmicAiService.getInstance().validateModelAgainstRequirements(
+                result -> {
+                    chatArea.append("Esito validazione:\n" + result + "\n\n");
+                    validateButton.setEnabled(true);
+                },
+                error -> {
+                    chatArea.append("[Errore validazione] " + error.getMessage() + "\n\n");
+                    validateButton.setEnabled(true);
+                });
+    }
+
     // ------------------------------------------------------------------
     // CosmicAnalysisListener: il Service richiama SEMPRE questi metodi
-    // sull'EDT, quindi qui si puo' toccare Swing direttamente.
+    // sull'EDT, quindi qui si puo' toccare Swing direttamente. Vengono
+    // richiamati sia dall'analisi LLM sia dal ricalcolo live (Task 4).
     // ------------------------------------------------------------------
 
     @Override
@@ -288,7 +305,6 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
     @Override
     public void onBusyStateChanged(boolean busy) {
         analyzeButton.setEnabled(!busy && pendingRequirementsText != null);
-        demoButton.setEnabled(!busy);
         chooseFileButton.setEnabled(!busy);
         progressBar.setVisible(busy);
     }
