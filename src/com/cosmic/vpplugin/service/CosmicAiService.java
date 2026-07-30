@@ -216,7 +216,7 @@ public final class CosmicAiService {
             }
             IDiagramUIModel activeDiagram;
             try {
-                activeDiagram = ApplicationManager.instance().getViewManager().getActiveDiagram();
+                activeDiagram = ApplicationManager.instance().getDiagramManager().getActiveDiagram();
             } catch (Exception ex) {
                 return; // nessun diagramma attivo/focus non su un diagramma: nulla da fare
             }
