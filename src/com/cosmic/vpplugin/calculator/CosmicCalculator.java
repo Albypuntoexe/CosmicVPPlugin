@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Motore di calcolo COSMIC (Fase 3).
@@ -37,10 +38,23 @@ import java.util.Map;
  *    dei CFP dei suoi FP, cosi' come il totale di progetto e' la somma dei
  *    CFP di tutti gli Use Case.
  *
- * La classe e' interamente "stateless": ogni chiamata a {@link #compute}
+ * La classe e' interamente "stateless" per {@link #compute}: ogni chiamata
  * riceve il modello e restituisce un nuovo {@link CosmicReport}, senza
  * effetti collaterali su {@link CosmicJsonModel} (che resta la fonte di
- * verita' proveniente dal JSON/LLM).
+ * verita' proveniente dal JSON/LLM). L'unica eccezione deliberata e'
+ * {@link #applyViolationFlags}, introdotto in v2.0 per l'Epic 5: scrive
+ * {@code UseCase.violation} SUL modello, perche' e' proprio quel campo che
+ * il generatore di diagramma legge per decidere se colorare la shape.
+ *
+ * NOVITA' v2.0 (Ultimate):
+ *  - {@link #computeScoped}: Epic 3 (multi-diagramma / context-awareness).
+ *    Calcola un report limitato a un sottoinsieme di Use Case (tipicamente:
+ *    quelli disegnati sul diagramma attualmente attivo in VP, individuati
+ *    da {@code UseCase.diagramId}), lasciando {@link #compute} come calcolo
+ *    "Totale Progetto" invariato.
+ *  - {@link #applyViolationFlags}: Epic 5 (feedback visivo). Dopo un
+ *    {@link #compute}, propaga sul modello un messaggio di violazione
+ *    sintetico per ogni Use Case che contiene almeno un FP non conforme.
  */
 public final class CosmicCalculator {
 
@@ -51,9 +65,23 @@ public final class CosmicCalculator {
     private static final String WRITE = "W";
 
     public CosmicReport compute(CosmicJsonModel model) {
+        return computeScoped(model, null);
+    }
+
+    /**
+     * Come {@link #compute}, ma se {@code useCaseIdsInScope} non e' null
+     * limita la somma ai soli Use Case il cui {@code id} e' contenuto
+     * nell'insieme (Epic 3: CFP "nello scope del diagramma attivo").
+     * Se {@code useCaseIdsInScope} e' null, il comportamento e' identico
+     * a prima (Totale Progetto, tutti gli Use Case).
+     */
+    public CosmicReport computeScoped(CosmicJsonModel model, Set<String> useCaseIdsInScope) {
         CosmicReport report = new CosmicReport(model.projectName);
 
         for (UseCase uc : model.useCases) {
+            if (useCaseIdsInScope != null && !useCaseIdsInScope.contains(uc.id)) {
+                continue;
+            }
             UseCaseReport ucReport = new UseCaseReport(uc.id, uc.name);
 
             for (FunctionalProcess fp : uc.functionalProcesses) {
@@ -67,6 +95,42 @@ public final class CosmicCalculator {
         }
 
         return report;
+    }
+
+    /**
+     * Epic 5: propaga sul modello (mutandolo) un messaggio di violazione
+     * sintetico per ogni Use Case che ha almeno un Functional Process non
+     * conforme alla regola minima COSMIC. Il generatore/service leggeranno
+     * {@code UseCase.violation} per applicare il feedback visivo sulla
+     * shape (stereotipo/colore). Se un Use Case torna conforme dopo una
+     * modifica, il campo viene ripulito (settato a null) per far
+     * "sparire" la colorazione di allarme.
+     */
+    public void applyViolationFlags(CosmicJsonModel model, CosmicReport report) {
+        Map<String, UseCaseReport> byId = new LinkedHashMap<>();
+        for (UseCaseReport r : report.useCases) {
+            byId.put(r.id, r);
+        }
+        for (UseCase uc : model.useCases) {
+            UseCaseReport r = byId.get(uc.id);
+            uc.violation = (r != null) ? buildViolationSummary(r) : null;
+        }
+    }
+
+    private String buildViolationSummary(UseCaseReport ucReport) {
+        List<String> problems = new ArrayList<>();
+        for (FunctionalProcessReport fp : ucReport.functionalProcesses) {
+            if (fp.warning != null) {
+                problems.add("[" + fp.fpId + "] " + fp.warning);
+            }
+            if (!fp.unknownMovementTypes.isEmpty()) {
+                problems.add("[" + fp.fpId + "] Data movement non riconosciuti: " + fp.unknownMovementTypes);
+            }
+        }
+        if (problems.isEmpty()) {
+            return null;
+        }
+        return String.join(" | ", problems);
     }
 
     private FunctionalProcessReport computeFunctionalProcess(FunctionalProcess fp) {
@@ -150,7 +214,7 @@ public final class CosmicCalculator {
             StringBuilder sb = new StringBuilder();
             sb.append("=== COSMIC Functional Size Measurement ===\n");
             sb.append("Progetto: ").append(projectName).append("\n");
-            sb.append("TOTALE PROGETTO: ").append(totalCfp).append(" CFP\n\n");
+            sb.append("TOTALE: ").append(totalCfp).append(" CFP\n\n");
 
             for (UseCaseReport uc : useCases) {
                 sb.append("- Use Case [").append(uc.id).append("] ").append(uc.name)

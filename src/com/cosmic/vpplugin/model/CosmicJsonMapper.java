@@ -32,6 +32,13 @@ import java.util.Map;
  * ClassCastException silenziosa se un campo del JSON non e' del tipo
  * atteso); ora controllano il tipo con {@code instanceof} e restituiscono
  * rispettivamente {@code null}/lista vuota in ogni altro caso.
+ *
+ * AGGIORNAMENTO v2.0 (Epic 2/3): l'LLM, con il nuovo systemPrompt di
+ * {@code CosmicAiService.buildCosmicSystemPrompt}, puo' ora restituire un
+ * campo opzionale {@code "subsystem"} per ogni useCase (raggruppamento
+ * logico usato da UseCaseDiagramGenerator per il multi-diagramma). Il
+ * campo e' opzionale: se assente resta null e tutto continua a funzionare
+ * come prima (un solo diagramma "default").
  */
 public final class CosmicJsonMapper {
 
@@ -62,6 +69,7 @@ public final class CosmicJsonMapper {
             uc.name = str(u.get("name"), "Use Case");
             uc.primaryActorId = str(u.get("primaryActorId"), null);
             uc.specification = str(u.get("specification"), "");
+            uc.subsystem = str(u.get("subsystem"), null); // Epic 3: opzionale
 
             for (Object s : list(u.get("mainScenario"))) {
                 uc.mainScenario.add(String.valueOf(s));

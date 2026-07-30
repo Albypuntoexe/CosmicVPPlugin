@@ -21,13 +21,16 @@ import com.vp.plugin.model.IInclude;
 import com.vp.plugin.model.IUseCase;
 import com.vp.plugin.model.factory.IModelElementFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
 /**
- * Traduce un {@link CosmicJsonModel} in un vero Use Case Diagram dentro il
- * progetto Visual Paradigm correntemente aperto.
+ * Traduce un {@link CosmicJsonModel} in uno o piu' Use Case Diagram reali
+ * dentro il progetto Visual Paradigm correntemente aperto.
  *
  * Pattern Open API (5 step, per ogni elemento), confermato dalla guida
  * ufficiale VP ("Working with diagrams/Diagram elements"):
@@ -40,14 +43,36 @@ import java.util.function.Consumer;
  *     impostare from/to, poi creare il connettore con
  *     {@link DiagramManager#createConnector}.
  *
- * MODIFICA rispetto alla versione precedente: le righe di log/debug sulle
- * relazioni include/extend non vengono piu' scritte con
- * {@code ApplicationManager.getViewManager().showMessage(...)} (che le
- * mandava nel Message Pane GLOBALE di Visual Paradigm, visibile e
- * persistente per tutta la sessione, anche dopo la chiusura del pannello
- * COSMIC AI). Vengono invece inviate al {@link #logSink} opzionale,
- * normalmente collegato al log del dialog di analisi: stesso contenuto
- * informativo, ma confinato alla UI del plugin.
+ * AGGIORNAMENTI v2.0 (Ultimate):
+ *
+ * Epic 3 (Multi-Diagramma / Context-Awareness): se i requisiti sono
+ * raggruppabili per {@code UseCase.subsystem} (campo opzionale prodotto
+ * dall'LLM, si veda {@code CosmicAiService.buildCosmicSystemPrompt}), NON
+ * viene piu' generato un solo diagramma monolitico: si genera un
+ * {@link IUseCaseDiagramUIModel} per ciascun subsystem distinto. Se nessun
+ * Use Case ha un subsystem assegnato, il comportamento resta identico a
+ * prima (un solo diagramma "Generated Diagram"). Le relazioni
+ * <<include>>/<<extend>> tra Use Case che finiscono su diagrammi DIVERSI
+ * non possono avere una freccia disegnata (una connector VP richiede
+ * entrambe le shape sullo stesso diagramma): in tal caso viene loggato un
+ * avviso invece di forzare una freccia "invisibile" o duplicare lo Use
+ * Case su piu' diagrammi (che falserebbe il conteggio COSMIC).
+ *
+ * Epic 4 (ID Tracking): dopo la creazione di ogni {@code IUseCase}, l'id
+ * interno assegnato da VP viene salvato in {@code UseCase.vpElementId} (e
+ * l'id del diagramma in {@code UseCase.diagramId}). Da qui in avanti
+ * {@code CosmicAiService} usa questo id per la sync bidirezionale, non piu'
+ * il nome (fragile su rename manuali).
+ *
+ * Epic 5 (Feedback visivo): a fine generazione viene invocato
+ * {@link VisualFeedbackApplier} per applicare l'etichetta CFP iniziale (0,
+ * perche' il calcolo avviene DOPO la generazione nella pipeline di
+ * {@code CosmicAiService.runPipelineOnJson}): il valore reale arriva con il
+ * primo ricalcolo, gia' cablato nello stesso service.
+ *
+ * Le righe di log/debug sulle relazioni include/extend restano inviate al
+ * {@link #logSink} opzionale (non al Message Pane globale di VP), come
+ * nella revisione precedente.
  */
 public final class UseCaseDiagramGenerator {
 
@@ -65,6 +90,9 @@ public final class UseCaseDiagramGenerator {
     private static final int UC_W = 220;
     private static final int UC_H = 90;
 
+    /** Chiave usata per raggruppare gli Use Case senza subsystem esplicito: mantiene il comportamento "un solo diagramma" di v1.x. */
+    private static final String DEFAULT_SUBSYSTEM_KEY = "__default__";
+
     private final DiagramManager diagramManager = ApplicationManager.instance().getDiagramManager();
 
     /** No-op di default: chi non imposta un log sink non perde alcuna funzionalita'. */
@@ -76,68 +104,124 @@ public final class UseCaseDiagramGenerator {
     }
 
     public void generate(CosmicJsonModel model) {
-        IUseCaseDiagramUIModel diagram = createDiagram(model.projectName);
+        Map<String, List<UseCase>> groups = groupBySubsystem(model);
+        boolean multiDiagram = groups.size() > 1;
 
-        Map<String, IActorUIModel> actorShapes = new HashMap<>();
-        Map<String, IUseCaseUIModel> useCaseShapes = new HashMap<>();
-        Map<String, IUseCase> useCaseElements = new HashMap<>();
         Map<String, IActor> actorElements = new HashMap<>();
+        List<IUseCaseDiagramUIModel> createdDiagrams = new ArrayList<>();
 
-        drawActors(diagram, model, actorShapes, actorElements);
-        drawUseCases(diagram, model, useCaseShapes, useCaseElements);
-        drawPrimaryActorAssociations(diagram, model, actorShapes, actorElements, useCaseShapes, useCaseElements);
-        drawIncludeRelations(diagram, model, useCaseShapes, useCaseElements);
-        drawExtendRelations(diagram, model, useCaseShapes, useCaseElements);
+        for (Map.Entry<String, List<UseCase>> group : groups.entrySet()) {
+            String subsystemKey = group.getKey();
+            List<UseCase> ucsInGroup = group.getValue();
 
-        diagramManager.openDiagram(diagram);
+            IUseCaseDiagramUIModel diagram = createDiagram(model.projectName, subsystemKey, multiDiagram);
+            createdDiagrams.add(diagram);
+
+            Map<String, IActorUIModel> actorShapes = new HashMap<>();
+            Map<String, IUseCaseUIModel> useCaseShapes = new HashMap<>();
+            Map<String, IUseCase> useCaseElements = new HashMap<>();
+
+            drawActors(diagram, model, ucsInGroup, actorShapes, actorElements);
+            drawUseCases(diagram, ucsInGroup, useCaseShapes, useCaseElements);
+            drawPrimaryActorAssociations(diagram, ucsInGroup, actorShapes, actorElements, useCaseShapes, useCaseElements);
+            drawIncludeRelations(diagram, ucsInGroup, useCaseShapes, useCaseElements);
+            drawExtendRelations(diagram, ucsInGroup, useCaseShapes, useCaseElements);
+
+            diagramManager.openDiagram(diagram);
+        }
+
+        if (multiDiagram) {
+            logSink.accept("Generati " + createdDiagrams.size() + " diagrammi separati (raggruppamento per subsystem).");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 0) Raggruppamento per subsystem (Epic 3)
+    // ------------------------------------------------------------------
+
+    /**
+     * Restituisce gli Use Case raggruppati per {@code subsystem}, preservando
+     * l'ordine di apparizione nel JSON. Se NESSUN Use Case ha un subsystem
+     * (caso comune, retro-compatibile), il risultato e' una mappa con
+     * un'unica entry {@link #DEFAULT_SUBSYSTEM_KEY} -> tutti gli Use Case,
+     * cosi' {@link #generate} produce esattamente un diagramma come in v1.x.
+     */
+    private Map<String, List<UseCase>> groupBySubsystem(CosmicJsonModel model) {
+        Map<String, List<UseCase>> groups = new LinkedHashMap<>();
+        for (UseCase uc : model.useCases) {
+            String key = (uc.subsystem == null || uc.subsystem.isBlank()) ? DEFAULT_SUBSYSTEM_KEY : uc.subsystem.trim();
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(uc);
+        }
+        if (groups.isEmpty()) {
+            groups.put(DEFAULT_SUBSYSTEM_KEY, new ArrayList<>());
+        }
+        return groups;
     }
 
     // ------------------------------------------------------------------
     // 1) Creazione del diagramma vuoto
     // ------------------------------------------------------------------
 
-    private IUseCaseDiagramUIModel createDiagram(String projectName) {
+    private IUseCaseDiagramUIModel createDiagram(String projectName, String subsystemKey, boolean multiDiagram) {
         @SuppressWarnings("deprecation")
         String diagramType = DiagramManager.DIAGRAM_TYPE_USE_CASE_DIAGRAM;
 
         IUseCaseDiagramUIModel diagram =
                 (IUseCaseDiagramUIModel) diagramManager.createDiagram(diagramType);
-        diagram.setName("COSMIC AI - " + (projectName == null ? "Generated Diagram" : projectName));
+
+        String baseName = "COSMIC AI - " + (projectName == null ? "Generated Diagram" : projectName);
+        String name = (multiDiagram && !DEFAULT_SUBSYSTEM_KEY.equals(subsystemKey))
+                ? baseName + " [" + subsystemKey + "]"
+                : baseName;
+        diagram.setName(name);
         return diagram;
     }
 
     // ------------------------------------------------------------------
-    // 2) Attori
+    // 2) Attori (limitati a quelli referenziati dagli Use Case del gruppo corrente)
     // ------------------------------------------------------------------
 
-    private void drawActors(IUseCaseDiagramUIModel diagram, CosmicJsonModel model,
+    private void drawActors(IUseCaseDiagramUIModel diagram, CosmicJsonModel model, List<UseCase> ucsInGroup,
                              Map<String, IActorUIModel> actorShapes,
                              Map<String, IActor> actorElements) {
         int i = 0;
         for (Actor actorDto : model.actors) {
-            IActor actorModel = IModelElementFactory.instance().createActor();
-            actorModel.setName(actorDto.name);
-            actorModel.setDescription(actorDto.description);
+            boolean referencedInGroup = ucsInGroup.stream()
+                    .anyMatch(uc -> actorDto.id != null && actorDto.id.equals(uc.primaryActorId));
+            if (!referencedInGroup) {
+                continue;
+            }
+
+            // Il modello IActor e' condiviso tra diagrammi (stesso attore
+            // puo' comparire in piu' subsystem): lo creiamo una sola volta
+            // e ne riusiamo il riferimento per le shape sugli altri diagrammi.
+            IActor actorModel = actorElements.get(actorDto.id);
+            if (actorModel == null) {
+                actorModel = IModelElementFactory.instance().createActor();
+                actorModel.setName(actorDto.name);
+                actorModel.setDescription(actorDto.description);
+                actorElements.put(actorDto.id, actorModel);
+            }
 
             IActorUIModel actorShape =
                     (IActorUIModel) diagramManager.createDiagramElement(diagram, actorModel);
             actorShape.setBounds(ACTOR_X, ACTOR_Y_START + i * ACTOR_Y_STEP, ACTOR_W, ACTOR_H);
 
             actorShapes.put(actorDto.id, actorShape);
-            actorElements.put(actorDto.id, actorModel);
             i++;
         }
     }
 
     // ------------------------------------------------------------------
     // 3) Use Case (con descrizione arricchita: scenario, eccezioni, FP)
+    //    + Epic 4: salvataggio di vpElementId/diagramId sul DTO
     // ------------------------------------------------------------------
 
-    private void drawUseCases(IUseCaseDiagramUIModel diagram, CosmicJsonModel model,
+    private void drawUseCases(IUseCaseDiagramUIModel diagram, List<UseCase> ucsInGroup,
                                Map<String, IUseCaseUIModel> useCaseShapes,
                                Map<String, IUseCase> useCaseElements) {
         int i = 0;
-        for (UseCase ucDto : model.useCases) {
+        for (UseCase ucDto : ucsInGroup) {
             IUseCase ucModel = IModelElementFactory.instance().createUseCase();
             ucModel.setName(ucDto.name);
             ucModel.setDescription(buildDescription(ucDto));
@@ -151,6 +235,11 @@ public final class UseCaseDiagramGenerator {
 
             useCaseShapes.put(ucDto.id, ucShape);
             useCaseElements.put(ucDto.id, ucModel);
+
+            // --- Epic 4: ID tracking robusto ---
+            ucDto.vpElementId = ucModel.getId();
+            ucDto.diagramId = diagram.getId();
+
             i++;
         }
     }
@@ -181,6 +270,9 @@ public final class UseCaseDiagramGenerator {
 
         if (!uc.functionalProcesses.isEmpty()) {
             sb.append("\n--- COSMIC Functional Processes (").append(uc.functionalProcesses.size()).append(") ---\n");
+            sb.append("NOTA: la scomposizione UC -> FP NON e' 1:1 (si veda CosMet, De Vito et al.): ")
+              .append("questo Use Case genera ").append(uc.functionalProcesses.size())
+              .append(" Processo/i Funzionale/i COSMIC distinti.\n");
             for (FunctionalProcess fp : uc.functionalProcesses) {
                 sb.append("* FP [").append(fp.fpId).append("] ").append(fp.fpName).append("\n");
                 sb.append("  Triggering Event: ").append(fp.triggeringEvent).append("\n");
@@ -205,12 +297,12 @@ public final class UseCaseDiagramGenerator {
     // 4) Associazione Attore -> Use Case primario
     // ------------------------------------------------------------------
 
-    private void drawPrimaryActorAssociations(IUseCaseDiagramUIModel diagram, CosmicJsonModel model,
+    private void drawPrimaryActorAssociations(IUseCaseDiagramUIModel diagram, List<UseCase> ucsInGroup,
                                                Map<String, IActorUIModel> actorShapes,
                                                Map<String, IActor> actorElements,
                                                Map<String, IUseCaseUIModel> useCaseShapes,
                                                Map<String, IUseCase> useCaseElements) {
-        for (UseCase ucDto : model.useCases) {
+        for (UseCase ucDto : ucsInGroup) {
             if (ucDto.primaryActorId == null) continue;
 
             IActor fromModel = actorElements.get(ucDto.primaryActorId);
@@ -229,13 +321,13 @@ public final class UseCaseDiagramGenerator {
     }
 
     // ------------------------------------------------------------------
-    // 5) Relazioni <<include>>
+    // 5) Relazioni <<include>> (solo intra-gruppo/diagramma: si veda Epic 3 nel Javadoc di classe)
     // ------------------------------------------------------------------
 
-    private void drawIncludeRelations(IUseCaseDiagramUIModel diagram, CosmicJsonModel model,
+    private void drawIncludeRelations(IUseCaseDiagramUIModel diagram, List<UseCase> ucsInGroup,
                                        Map<String, IUseCaseUIModel> useCaseShapes,
                                        Map<String, IUseCase> useCaseElements) {
-        for (UseCase ucDto : model.useCases) {
+        for (UseCase ucDto : ucsInGroup) {
             IUseCase baseModel = useCaseElements.get(ucDto.id);
             IUseCaseUIModel baseShape = useCaseShapes.get(ucDto.id);
             if (baseModel == null || ucDto.includesIds.isEmpty()) {
@@ -247,8 +339,9 @@ public final class UseCaseDiagramGenerator {
                 IUseCaseUIModel includedShape = useCaseShapes.get(includedId);
                 if (includedModel == null || includedShape == null) {
                     logSink.accept("<<include>> SALTATO: '" + includedId
-                            + "' non trovato tra gli Use Case disegnati (controlla che l'id combaci "
-                            + "esattamente con lo 'id' di un altro useCase nel JSON).");
+                            + "' non trovato sullo stesso diagramma di '" + ucDto.id
+                            + "' (o e' finito in un subsystem/diagramma diverso: con Epic 3 le relazioni "
+                            + "cross-diagramma non vengono disegnate come freccia, solo segnalate qui).");
                     continue;
                 }
 
@@ -265,13 +358,13 @@ public final class UseCaseDiagramGenerator {
     }
 
     // ------------------------------------------------------------------
-    // 6) Relazioni <<extend>>
+    // 6) Relazioni <<extend>> (solo intra-gruppo/diagramma)
     // ------------------------------------------------------------------
 
-    private void drawExtendRelations(IUseCaseDiagramUIModel diagram, CosmicJsonModel model,
+    private void drawExtendRelations(IUseCaseDiagramUIModel diagram, List<UseCase> ucsInGroup,
                                       Map<String, IUseCaseUIModel> useCaseShapes,
                                       Map<String, IUseCase> useCaseElements) {
-        for (UseCase ucDto : model.useCases) {
+        for (UseCase ucDto : ucsInGroup) {
             IUseCase extensionModel = useCaseElements.get(ucDto.id);
             IUseCaseUIModel extensionShape = useCaseShapes.get(ucDto.id);
             if (extensionModel == null || ucDto.extendsList.isEmpty()) {
@@ -283,8 +376,8 @@ public final class UseCaseDiagramGenerator {
                 IUseCaseUIModel baseShape = useCaseShapes.get(ext.targetId);
                 if (baseModel == null || baseShape == null) {
                     logSink.accept("<<extend>> SALTATO: targetId '" + ext.targetId
-                            + "' non trovato tra gli Use Case disegnati (controlla che l'id combaci "
-                            + "esattamente con lo 'id' di un altro useCase nel JSON).");
+                            + "' non trovato sullo stesso diagramma di '" + ucDto.id
+                            + "' (o e' finito in un subsystem/diagramma diverso).");
                     continue;
                 }
 

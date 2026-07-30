@@ -19,6 +19,11 @@ import com.cosmic.vpplugin.model.CosmicJsonModel;
  * di questa interfaccia, garantirlo): chi implementa questa interfaccia puo'
  * quindi aggiornare componenti Swing direttamente, senza ulteriori
  * SwingUtilities.invokeLater.
+ *
+ * AGGIORNAMENTO v2.0 (Epic 3): {@link #onScopeChanged} e' un metodo
+ * DEFAULT (no-op) apposta, per non rompere binariamente eventuali
+ * implementazioni esistenti dell'interfaccia scritte prima di questa
+ * revisione (compatibilita' additiva).
  */
 public interface CosmicAnalysisListener {
 
@@ -33,4 +38,17 @@ public interface CosmicAnalysisListener {
 
     /** Analisi fallita (errore di rete, JSON non valido, errore Open API...). */
     void onAnalysisFailed(Throwable error);
+
+    /**
+     * Epic 3 - Multi-Diagramma e Context-Awareness: notificato quando il
+     * diagramma attivo in Visual Paradigm cambia (o quando il suo contenuto
+     * viene ricalcolato). {@code diagramName} e' null se nessun diagramma
+     * e' a fuoco. {@code scopedReport} contiene i CFP dei soli Use Case
+     * disegnati su quel diagramma; {@code projectTotalReport} e' sempre il
+     * Totale Progetto completo, cosi' la UI puo' mostrare entrambi senza
+     * mai "perdere di vista" il totale complessivo.
+     */
+    default void onScopeChanged(String diagramName, CosmicReport scopedReport, CosmicReport projectTotalReport) {
+        // no-op di default: implementazioni pre-v2.0 continuano a compilare/funzionare inalterate.
+    }
 }

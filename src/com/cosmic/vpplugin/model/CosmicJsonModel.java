@@ -26,6 +26,35 @@ import java.util.List;
  *    referenziano gli id di altri UseCase: questo permette all'ereditarieta'
  *    (un UseCase incluso/esteso eredita/aggiorna il costo COSMIC del padre)
  *    di essere ricalcolata in futuro senza duplicare i dati.
+ *
+ * AGGIORNAMENTI v2.0 (Ultimate):
+ *
+ * 4) {@link UseCase#vpElementId} (Epic 4): l'id LOGICO usato dall'LLM per
+ *    le cross-reference nel JSON ({@code id}, usato da includesIds/extendsList)
+ *    e l'id INTERNO assegnato da Visual Paradigm alla creazione dell'IUseCase
+ *    reale sul diagramma sono due cose diverse e vanno tenuti separati:
+ *      - {@code id}           -> chiave logica, stabile, generata dall'LLM;
+ *        usata SOLO per risolvere le relazioni dentro il JSON.
+ *      - {@code vpElementId}  -> IModelElement.getId() del vero oggetto VP,
+ *        valorizzato da UseCaseDiagramGenerator DOPO la creazione. E' la
+ *        chiave usata da CosmicAiService per la sync bidirezionale (rename,
+ *        aggiunta/rimozione), che prima si basava sul nome (fragile: un
+ *        rename manuale "rompeva" la corrispondenza).
+ *
+ * 5) {@link UseCase#subsystem} (Epic 3): raggruppamento logico opzionale
+ *    (es. "Prenotazioni", "Fatturazione") suggerito dall'LLM in base al
+ *    documento dei requisiti. UseCaseDiagramGenerator lo usa per decidere
+ *    se generare un solo diagramma o uno per subsystem.
+ *
+ * 6) {@link UseCase#diagramId} (Epic 3): l'id del IUseCaseDiagramUIModel su
+ *    cui questo Use Case e' stato effettivamente disegnato. Permette al
+ *    Service di calcolare i CFP "nello scope" del diagramma attivo in VP,
+ *    senza dover indovinare la corrispondenza a runtime.
+ *
+ * 7) {@link UseCase#violation} (Epic 5): messaggio di violazione COSMIC/
+ *    requisiti corrente (null se nessuna). Viene scritto dal Calculator o
+ *    dal Service dopo un ricalcolo, e letto da UseCaseDiagramGenerator/
+ *    VisualFeedbackApplier per colorare la shape sul diagramma.
  */
 public final class CosmicJsonModel {
 
@@ -60,6 +89,20 @@ public final class CosmicJsonModel {
 
         // Mappatura verso i Processi Funzionali COSMIC (1..N per UseCase)
         public List<FunctionalProcess> functionalProcesses = new ArrayList<>();
+
+        // --- v2.0: raggruppamento multi-diagramma (Epic 3) ---
+        /** Raggruppamento logico opzionale (subsystem/modulo); null = "default". */
+        public String subsystem;
+
+        // --- v2.0: ID tracking robusto (Epic 4) ---
+        /** IModelElement.getId() del vero IUseCase creato su VP; null finche' non generato. */
+        public String vpElementId;
+        /** IDiagramUIModel.getId() del diagramma su cui questo Use Case vive; null finche' non generato. */
+        public String diagramId;
+
+        // --- v2.0: feedback visivo / warning (Epic 5) ---
+        /** Messaggio di violazione corrente (regola COSMIC minima o requisito originario), null se nessuna. */
+        public String violation;
     }
 
     public static final class FunctionalProcess {
