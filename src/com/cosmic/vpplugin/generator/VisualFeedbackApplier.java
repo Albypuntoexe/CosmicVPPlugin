@@ -65,7 +65,13 @@ public final class VisualFeedbackApplier {
             removeStereotypesWithPrefix(ucModel, VIOLATION_STEREOTYPE_PREFIX);
             if (hasViolation) {
                 ucModel.addStereotype(VIOLATION_STEREOTYPE_PREFIX);
-                ucModel.setDescription(appendViolationNote(ucModel.getDescription(), violationMessage));
+
+                // FIX: Controlliamo se la descrizione cambia davvero prima di sovrascriverla!
+                String currentDesc = ucModel.getDescription();
+                String newDesc = appendViolationNote(currentDesc, violationMessage);
+                if (!newDesc.equals(currentDesc)) {
+                    ucModel.setDescription(newDesc);
+                }
             }
         } catch (Exception ex) {
             System.out.println("[COSMIC AI][visual] Impossibile applicare lo stereotipo di violazione: " + ex);

@@ -646,11 +646,12 @@ public final class CosmicAiService {
                     changed = true;
                 }
             } else if (lower.contains("desc") || lower.contains("doc")) {
-                // La description arricchita e' generata da noi (scenario/FP): un
-                // rename manuale della description sovrascrive solo la "specification"
-                // libera che l'utente sta effettivamente editando a mano.
-                dto.specification = safeTrim(element.getDescription());
-                changed = true;
+                String newSpec = safeTrim(element.getDescription());
+                // FIX: Ricalcoliamo solo se il testo è effettivamente cambiato!
+                if (!newSpec.equals(dto.specification)) {
+                    dto.specification = newSpec;
+                    changed = true;
+                }
             }
             if (changed) {
                 recomputeAndPublish("Rilevata modifica di '" + propertyName + "' su " + dto.name + ".");
