@@ -90,7 +90,7 @@ public final class CosmicAiService {
     // ------------------------------------------------------------------
 
     private static final String LLM_ENDPOINT_URL = "http://localhost:1234/v1/chat/completions";
-    private static final String LLM_MODEL = "openai/gpt-oss-20b";
+    private static final String LLM_MODEL = "qwen2.5-7b-instruct-1m";
     private static final Duration LLM_REQUEST_TIMEOUT = Duration.ofSeconds(120);
 
     private static final int PROJECT_WATCHER_INTERVAL_MS = 1500;
@@ -639,20 +639,15 @@ public final class CosmicAiService {
             }
             boolean changed = false;
             String lower = propertyName.toLowerCase();
+
             if (lower.contains("name")) {
                 String newName = safeTrim(element.getName());
                 if (!newName.isEmpty() && !newName.equals(dto.name)) {
                     dto.name = newName;
                     changed = true;
                 }
-            } else if (lower.contains("desc") || lower.contains("doc")) {
-                String newSpec = safeTrim(element.getDescription());
-                // FIX: Ricalcoliamo solo se il testo è effettivamente cambiato!
-                if (!newSpec.equals(dto.specification)) {
-                    dto.specification = newSpec;
-                    changed = true;
-                }
             }
+
             if (changed) {
                 recomputeAndPublish("Rilevata modifica di '" + propertyName + "' su " + dto.name + ".");
             }

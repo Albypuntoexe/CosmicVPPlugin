@@ -92,13 +92,22 @@ public final class VisualFeedbackApplier {
     }
 
     private static String appendViolationNote(String currentDescription, String violationMessage) {
-        String base = (currentDescription == null) ? "" : currentDescription;
-        String marker = "\n\n[COSMIC AI - VIOLAZIONE] ";
-        int markerIndex = base.indexOf("[COSMIC AI - VIOLAZIONE]");
-        if (markerIndex >= 0) {
-            int noteStart = base.lastIndexOf('\n', markerIndex);
-            base = (noteStart > 0) ? base.substring(0, noteStart) : "";
+        if (currentDescription == null) {
+            currentDescription = "";
         }
-        return base + marker + violationMessage;
+
+        // Cerca e rimuove perfettamente la vecchia nota, inclusi i due a-capo precedenti
+        int noteIndex = currentDescription.indexOf("\n\n[COSMIC AI - VIOLAZIONE]");
+        if (noteIndex >= 0) {
+            currentDescription = currentDescription.substring(0, noteIndex);
+        } else {
+            // Fallback nel caso in cui gli a-capo siano stati cancellati a mano
+            int fallbackIndex = currentDescription.indexOf("[COSMIC AI - VIOLAZIONE]");
+            if (fallbackIndex >= 0) {
+                currentDescription = currentDescription.substring(0, fallbackIndex).trim();
+            }
+        }
+
+        return currentDescription + "\n\n[COSMIC AI - VIOLAZIONE] " + violationMessage;
     }
 }

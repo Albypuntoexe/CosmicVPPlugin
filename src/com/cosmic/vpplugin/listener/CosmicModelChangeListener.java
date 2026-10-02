@@ -69,7 +69,7 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
 
     /** Proprieta' che ci interessano davvero: evitiamo di reagire a ogni micro-evento grafico (bounds, colore, ecc.). */
     private static final Set<String> WATCHED_PROPERTIES = Collections.unmodifiableSet(
-            Set.of("name", "Name", "description", "Description", "documentation", "Documentation"));
+            Set.of("name", "Name"));
 
     /** Un solo listener per elemento, per evitare doppie notifiche se modelAdded viene chiamato più volte sullo stesso oggetto. */
     private final WeakHashMap<IModelElement, PropertyChangeListener> attachedPropertyListeners = new WeakHashMap<>();
