@@ -90,7 +90,7 @@ public final class CosmicAiService {
     // ------------------------------------------------------------------
 
     private static final String LLM_ENDPOINT_URL = "http://localhost:1234/v1/chat/completions";
-    private static final String LLM_MODEL = "qwen2.5-7b-instruct-1m";
+    private static final String LLM_MODEL = "qwen2.5-7b-instruct";
     private static final Duration LLM_REQUEST_TIMEOUT = Duration.ofSeconds(120);
 
     private static final int PROJECT_WATCHER_INTERVAL_MS = 1500;
