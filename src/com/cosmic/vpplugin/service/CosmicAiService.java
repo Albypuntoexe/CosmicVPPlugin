@@ -89,7 +89,7 @@ public final class CosmicAiService {
     // Configurazione LLM
     // ------------------------------------------------------------------
 
-    private static final String LLM_ENDPOINT_URL = "http://localhost:1234/v1/chat/completions";
+    private static final String LLM_ENDPOINT_URL = "http://127.0.0.1:1234/v1/chat/completions";
     private static final String LLM_MODEL = "openai/gpt-oss-20b";
     private static final Duration LLM_REQUEST_TIMEOUT = Duration.ofSeconds(120);
 
