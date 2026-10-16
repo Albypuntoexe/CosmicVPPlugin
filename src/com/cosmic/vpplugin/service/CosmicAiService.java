@@ -243,20 +243,32 @@ public final class CosmicAiService {
 
     private void runPipelineOnModel(CosmicJsonModel model, String originalText, CosmicAnalysisListener listener) {
         try {
-            listener.onLog("Generazione diagramma/i UML in corso...");
-            UseCaseDiagramGenerator generator = new UseCaseDiagramGenerator();
-            generator.setLogSink(listener::onLog);
-            generator.generate(model);
-
+            listener.onLog("Calcolo COSMIC Function Points (CFP) in memoria...");
             CosmicCalculator calculator = new CosmicCalculator();
             CosmicReport report = calculator.compute(model);
-            calculator.applyViolationFlags(model, report);
+
+            // PROTEZIONE ANTI-FREEZE PER VISUAL PARADIGM
+            if (model.useCases.size() > 40) {
+                listener.onLog("\n=======================================================");
+                listener.onLog("ATTENZIONE: Il modello contiene " + model.useCases.size() + " Use Case.");
+                listener.onLog("La generazione grafica del diagramma UML e' stata DISABILITATA.");
+                listener.onLog("Motivo: Disegnare centinaia di elementi causerebbe il freeze di Visual Paradigm.");
+                listener.onLog("I calcoli COSMIC sono stati comunque completati. Usa il pulsante 'Esporta Report CSV' per salvare i dati.");
+                listener.onLog("=======================================================\n");
+            } else {
+                listener.onLog("Generazione diagramma/i UML in corso...");
+                UseCaseDiagramGenerator generator = new UseCaseDiagramGenerator();
+                generator.setLogSink(listener::onLog);
+                generator.generate(model);
+
+                // Applica il colore e lo stereotipo solo se abbiamo disegnato fisicamente gli elementi
+                calculator.applyViolationFlags(model, report);
+                applyVisualFeedbackSafely();
+            }
 
             this.currentModel = model;
             this.lastReport = report;
             this.lastRequirementsText = originalText;
-
-            applyVisualFeedbackSafely();
 
             listener.onBusyStateChanged(false);
             listener.onAnalysisCompleted(model, report);
