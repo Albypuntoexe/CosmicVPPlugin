@@ -50,68 +50,80 @@ public final class CosmicTreeModelBuilder {
         }
 
         for (UseCase uc : model.useCases) {
-            UseCaseReport ucReport = reportByUcId.get(uc.id);
-            int ucCfp = (ucReport != null) ? ucReport.totalCfp : 0;
-
-            StringBuilder ucLabel = new StringBuilder();
-            ucLabel.append("Use Case [").append(uc.id).append("] ").append(uc.name)
-                   .append(" -> ").append(ucCfp).append(" CFP");
-            if (uc.subsystem != null && !uc.subsystem.isBlank()) {
-                ucLabel.append("  (subsystem: ").append(uc.subsystem).append(")");
-            }
-            if (uc.functionalProcesses.size() != 1) {
-                // Evidenzia esplicitamente il caso non-1:1, cosi' l'utente
-                // non deve contare i figli per notarlo.
-                ucLabel.append("  [" + uc.functionalProcesses.size() + " Functional Process]");
-            }
-            if (uc.violation != null && !uc.violation.isBlank()) {
-                ucLabel.append("  \u26A0 VIOLAZIONE");
-            }
-
-            DefaultMutableTreeNode ucNode = new DefaultMutableTreeNode(ucLabel.toString());
-            root.add(ucNode);
-
-            if (uc.functionalProcesses.isEmpty()) {
-                ucNode.add(new DefaultMutableTreeNode("(nessun Functional Process ancora mappato)"));
-                continue;
-            }
-
-            Map<String, FunctionalProcessReport> fpReportById = new LinkedHashMap<>();
-            if (ucReport != null) {
-                for (FunctionalProcessReport fpr : ucReport.functionalProcesses) {
-                    fpReportById.put(fpr.fpId, fpr);
-                }
-            }
-
-            for (FunctionalProcess fp : uc.functionalProcesses) {
-                FunctionalProcessReport fpReport = fpReportById.get(fp.fpId);
-                int fpCfp = (fpReport != null) ? fpReport.totalCfp : 0;
-
-                String fpLabel = "FP [" + fp.fpId + "] " + fp.fpName + " -> " + fpCfp + " CFP"
-                        + ((fpReport != null && fpReport.warning != null) ? "  \u26A0" : "");
-                DefaultMutableTreeNode fpNode = new DefaultMutableTreeNode(fpLabel);
-                ucNode.add(fpNode);
-
-                fpNode.add(new DefaultMutableTreeNode("Triggering Event: " + fp.triggeringEvent));
-
-                for (SubProcess sp : fp.subProcesses) {
-                    String dm = (sp.dataMovementType != null) ? sp.dataMovementType : "-";
-                    String spLabel = sp.step + ". " + sp.description + "  [" + dm + "]";
-                    if (sp.dataGroup != null) {
-                        spLabel += "  DG:" + sp.dataGroup;
-                    }
-                    if (sp.objectOfInterest != null) {
-                        spLabel += " OOI:" + sp.objectOfInterest;
-                    }
-                    fpNode.add(new DefaultMutableTreeNode(spLabel));
-                }
-
-                if (fpReport != null && fpReport.warning != null) {
-                    fpNode.add(new DefaultMutableTreeNode("\u26A0 " + fpReport.warning));
-                }
-            }
+            root.add(buildUseCaseNode(uc, reportByUcId.get(uc.id)));
         }
 
         return root;
+    }
+
+    /**
+     * v3.0 - Nodo Swing di UN solo use case (con i suoi FP e sotto-processi): permette alla UI di aggiungere i
+     * nodi uno alla volta mentre l'analisi procede, senza ricostruire l'intero albero.
+     */
+    public static DefaultMutableTreeNode buildUseCaseNode(UseCase uc, UseCaseReport ucReport) {
+        int ucCfp = (ucReport != null) ? ucReport.totalCfp : 0;
+
+        StringBuilder ucLabel = new StringBuilder();
+        ucLabel.append("Use Case [").append(uc.id).append("] ").append(uc.name)
+               .append(" -> ").append(ucCfp).append(" CFP");
+        if (uc.subsystem != null && !uc.subsystem.isBlank()) {
+            ucLabel.append("  (subsystem: ").append(uc.subsystem).append(")");
+        }
+        if (uc.functionalProcesses.size() != 1) {
+            // Evidenzia esplicitamente il caso non-1:1, cosi' l'utente
+            // non deve contare i figli per notarlo.
+            ucLabel.append("  [" + uc.functionalProcesses.size() + " Functional Process]");
+        }
+        if (uc.violation != null && !uc.violation.isBlank()) {
+            ucLabel.append("  \u26A0 VIOLAZIONE");
+        }
+
+        DefaultMutableTreeNode ucNode = new DefaultMutableTreeNode(ucLabel.toString());
+
+        if (uc.functionalProcesses.isEmpty()) {
+            ucNode.add(new DefaultMutableTreeNode("(nessun Functional Process ancora mappato)"));
+            return ucNode;
+        }
+
+        Map<String, FunctionalProcessReport> fpReportById = new LinkedHashMap<>();
+        if (ucReport != null) {
+            for (FunctionalProcessReport fpr : ucReport.functionalProcesses) {
+                fpReportById.put(fpr.fpId, fpr);
+            }
+        }
+
+        for (FunctionalProcess fp : uc.functionalProcesses) {
+            FunctionalProcessReport fpReport = fpReportById.get(fp.fpId);
+            int fpCfp = (fpReport != null) ? fpReport.totalCfp : 0;
+
+            String fpLabel = "FP [" + fp.fpId + "] " + fp.fpName + " -> " + fpCfp + " CFP"
+                    + ((fpReport != null && fpReport.warning != null) ? "  \u26A0" : "");
+            DefaultMutableTreeNode fpNode = new DefaultMutableTreeNode(fpLabel);
+            ucNode.add(fpNode);
+
+            fpNode.add(new DefaultMutableTreeNode("Triggering Event: " + fp.triggeringEvent));
+
+            for (SubProcess sp : fp.subProcesses) {
+                String dm = (sp.dataMovementType != null) ? sp.dataMovementType : "-";
+                String spLabel = sp.step + ". " + sp.description + "  [" + dm + "]";
+                if (sp.dataGroup != null) {
+                    spLabel += "  DG:" + sp.dataGroup;
+                }
+                if (sp.objectOfInterest != null) {
+                    spLabel += " OOI:" + sp.objectOfInterest;
+                }
+                fpNode.add(new DefaultMutableTreeNode(spLabel));
+            }
+
+            if (fpReport != null && fpReport.warning != null) {
+                fpNode.add(new DefaultMutableTreeNode("\u26A0 " + fpReport.warning));
+            }
+        }
+        return ucNode;
+    }
+
+    /** Etichetta della radice dell'albero (nome progetto + totale CFP corrente). */
+    public static String rootLabel(String projectName, int totalCfp) {
+        return "Progetto '" + projectName + "' - TOTALE: " + totalCfp + " CFP";
     }
 }

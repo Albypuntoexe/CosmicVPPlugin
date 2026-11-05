@@ -136,29 +136,7 @@ public final class CosmicCalculator {
     private FunctionalProcessReport computeFunctionalProcess(FunctionalProcess fp) {
         FunctionalProcessReport fpReport = new FunctionalProcessReport(fp.fpId, fp.fpName, fp.triggeringEvent);
 
-        for (SubProcess sp : fp.subProcesses) {
-            String dm = normalize(sp.dataMovementType);
-            if (dm == null) {
-                continue; // nessun movimento dati per questo sotto-processo (es. semplice click)
-            }
-            switch (dm) {
-                case ENTRY:
-                    fpReport.entryCount++;
-                    break;
-                case EXIT:
-                    fpReport.exitCount++;
-                    break;
-                case READ:
-                    fpReport.readCount++;
-                    break;
-                case WRITE:
-                    fpReport.writeCount++;
-                    break;
-                default:
-                    fpReport.unknownMovementTypes.add(sp.dataMovementType);
-                    break;
-            }
-        }
+        countMovements(fp, fpReport);
 
         fpReport.totalCfp = fpReport.entryCount + fpReport.exitCount + fpReport.readCount + fpReport.writeCount;
 
@@ -172,6 +150,77 @@ public final class CosmicCalculator {
         }
 
         return fpReport;
+    }
+
+    /**
+     * v3.0 - CFP di ogni singolo sotto-processo, con la STESSA regola usata da {@link #compute}
+     * (utile per il CSV di dettaglio, che replica la tabella "Measurement" del professore):
+     * 1 per ogni Data Movement valido, 0 per "nessun movimento dati" e 0 per i messaggi di
+     * errore/conferma (Exit con DG/OOI "Message(s)") successivi al primo dello stesso FP.
+     */
+    public int[] cfpPerSubProcess(FunctionalProcess fp) {
+        return countMovements(fp, null);
+    }
+
+    /**
+     * Cuore del conteggio. Regola COSMIC (manuale + paper CosMet, Sez. 3.2.2 e prompt.py del professore:
+     * "DG (Messages) - OOI (Message) - Exit. It must be counted only once."): tutti i messaggi di errore e
+     * di conferma di un Functional Process sono classificati Exit ma valgono UN SOLO CFP per processo.
+     *
+     * @param report se non null viene popolato con i contatori E/X/R/W
+     * @return CFP di ogni sotto-processo, nello stesso ordine di {@code fp.subProcesses}
+     */
+    private int[] countMovements(FunctionalProcess fp, FunctionalProcessReport report) {
+        int[] perRow = new int[fp.subProcesses.size()];
+        boolean messageExitAlreadyCounted = false;
+        for (int i = 0; i < fp.subProcesses.size(); i++) {
+            SubProcess sp = fp.subProcesses.get(i);
+            String dm = normalize(sp.dataMovementType);
+            if (dm == null) {
+                continue; // nessun movimento dati per questo sotto-processo (es. semplice click)
+            }
+            switch (dm) {
+                case ENTRY:
+                    perRow[i] = 1;
+                    if (report != null) report.entryCount++;
+                    break;
+                case EXIT:
+                    if (isMessageMovement(sp)) {
+                        if (messageExitAlreadyCounted) {
+                            if (report != null) report.ignoredMessageExits++;
+                            break; // 0 CFP: messaggio gia' contato per questo FP
+                        }
+                        messageExitAlreadyCounted = true;
+                    }
+                    perRow[i] = 1;
+                    if (report != null) report.exitCount++;
+                    break;
+                case READ:
+                    perRow[i] = 1;
+                    if (report != null) report.readCount++;
+                    break;
+                case WRITE:
+                    perRow[i] = 1;
+                    if (report != null) report.writeCount++;
+                    break;
+                default:
+                    if (report != null) report.unknownMovementTypes.add(sp.dataMovementType);
+                    break;
+            }
+        }
+        return perRow;
+    }
+
+    private static boolean isMessageMovement(SubProcess sp) {
+        return isMessageName(sp.objectOfInterest) || isMessageName(sp.dataGroup);
+    }
+
+    private static boolean isMessageName(String s) {
+        if (s == null) {
+            return false;
+        }
+        String t = s.trim().toLowerCase();
+        return t.equals("message") || t.equals("messages");
     }
 
     private String normalize(String dataMovementType) {
@@ -190,7 +239,7 @@ public final class CosmicCalculator {
             case "E": case "ENTRY": return ENTRY;
             case "X": case "EXIT": return EXIT;
             case "R": case "READ": return READ;
-            case "W": case "WRITE": return WRITE;
+            case "W": case "WRITE": case "D": case "DELETE": return WRITE; // come parseGPTResponse(): DM che inizia per 'D' => Write
             default: return upper; // resta "sconosciuto": verra' segnalato
         }
     }
@@ -295,6 +344,8 @@ public final class CosmicCalculator {
         public int readCount;
         public int writeCount;
         public int totalCfp;
+        /** Messaggi di errore/conferma (Exit) oltre il primo, non contati (regola "counted only once"). */
+        public int ignoredMessageExits;
         /** Non-null se il FP viola la regola minima COSMIC (>=2 CFP, E + W/X). */
         public String warning;
         public final List<String> unknownMovementTypes = new ArrayList<>();

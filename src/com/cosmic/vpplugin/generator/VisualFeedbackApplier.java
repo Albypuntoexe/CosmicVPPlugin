@@ -6,7 +6,6 @@ import com.cosmic.vpplugin.model.CosmicJsonModel;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
 
 import com.vp.plugin.ApplicationManager;
-import com.vp.plugin.diagram.IDiagramElement;
 import com.vp.plugin.model.IModelElement;
 import com.vp.plugin.model.IProject;
 import com.vp.plugin.model.IStereotype;
@@ -22,32 +21,39 @@ public final class VisualFeedbackApplier {
 
     private VisualFeedbackApplier() { }
 
+    /** Applica CFP + violazioni a TUTTI gli use case del modello (uso: ricalcoli globali). */
     public static void applyAll(CosmicJsonModel model, CosmicReport report) {
-        IProject project = ApplicationManager.instance().getProjectManager().getProject();
-        if (project == null) {
-            return;
-        }
         Map<String, UseCaseReport> cfpById = new LinkedHashMap<>();
         for (UseCaseReport r : report.useCases) {
             cfpById.put(r.id, r);
         }
-
         for (UseCase ucDto : model.useCases) {
-            if (ucDto.vpElementId == null) {
-                continue;
-            }
-            IModelElement element = project.getModelElementById(ucDto.vpElementId);
-            if (!(element instanceof IUseCase)) {
-                continue;
-            }
-            IUseCase ucModel = (IUseCase) element;
-
-            UseCaseReport cfpReport = cfpById.get(ucDto.id);
-            int cfp = (cfpReport != null) ? cfpReport.totalCfp : 0;
-
-            applyCfpStereotype(ucModel, cfp);
-            applyViolationFeedback(ucModel, ucDto.violation);
+            applyToUseCase(ucDto, cfpById.get(ucDto.id));
         }
+    }
+
+    /**
+     * v3.0 - Applica stereotipo {@code <<CFP:N>>} e, se {@code ucDto.violation} e' valorizzato, {@code <<Violation>>}
+     * a UN solo use case. E' la variante usata dal rendering incrementale: dopo ogni use case misurato si tocca
+     * solo la sua shape, invece di rifare tutti gli use case del diagramma (O(n^2) chiamate all'Open API).
+     * Va invocato sul thread grafico (EDT).
+     */
+    public static void applyToUseCase(UseCase ucDto, UseCaseReport cfpReport) {
+        if (ucDto == null || ucDto.vpElementId == null) {
+            return;
+        }
+        IProject project = ApplicationManager.instance().getProjectManager().getProject();
+        if (project == null) {
+            return;
+        }
+        IModelElement element = project.getModelElementById(ucDto.vpElementId);
+        if (!(element instanceof IUseCase)) {
+            return;
+        }
+        IUseCase ucModel = (IUseCase) element;
+        int cfp = (cfpReport != null) ? cfpReport.totalCfp : 0;
+        applyCfpStereotype(ucModel, cfp);
+        applyViolationFeedback(ucModel, ucDto.violation);
     }
 
     private static void applyCfpStereotype(IUseCase ucModel, int cfp) {

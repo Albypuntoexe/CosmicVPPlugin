@@ -68,6 +68,8 @@ public final class CosmicJsonModel {
         public String id;
         public String name;
         public String description;
+        /** v3.0: IModelElement.getId() dell'IActor creato su VP (null finche' non disegnato): serve alla sync dei rename. */
+        public String vpElementId;
     }
 
     public static final class ExtendRelation {
@@ -79,13 +81,16 @@ public final class CosmicJsonModel {
         public String id;
         public String name;
         public String primaryActorId;
+        /** v3.0: ulteriori attori associati allo Use Case (es. "Primary actor: Hotel manager, Operator"). */
+        public List<String> coActorIds = new ArrayList<>();
         public String specification;         // descrizione libera / Documentation
         public List<String> mainScenario = new ArrayList<>();
         public List<String> exceptions = new ArrayList<>();
 
         // Relazioni strutturali
         public List<String> includesIds = new ArrayList<>();     // UC che QUESTO UC include
-        public List<ExtendRelation> extendsList = new ArrayList<>(); // UC che ESTENDONO questo UC -> target = questo UC
+        /** Relazioni <<extend>> in cui QUESTO UC e' l'estensione: la freccia va da questo UC a {@code targetId} (UC base). */
+        public List<ExtendRelation> extendsList = new ArrayList<>();
 
         // Mappatura verso i Processi Funzionali COSMIC (1..N per UseCase)
         public List<FunctionalProcess> functionalProcesses = new ArrayList<>();
