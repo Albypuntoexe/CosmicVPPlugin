@@ -59,52 +59,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 /**
- * Orchestratore del plugin COSMIC AI (v4.0).
- *
- * <h3>Pipeline (replica dello script del professore, functions.py / prompt.py, con Micro-Loop)</h3>
- * Per OGNI use case, in loop e uno alla volta:
- * <ol>
- *   <li><b>Step 1 - Split</b>: SYSTEM_SPLIT_UC + {@code "<scenario>\n\nSplit:"} (frasi atomiche numerate);</li>
- *   <li><b>Step 2 - Measure (Micro-Loop, v4.0)</b>: l'output dello Step 1 viene parsato in Java in una lista di
- *       frasi e per OGNI frase si fa una chiamata LLM indipendente che estrae il data movement (E/X/R/W) di
- *       quella sola frase; i micro-risultati sono uniti in un unico FunctionalProcess. L'LLM non misura mai uno
- *       use case intero in un colpo solo (vedi {@link CosmicMicroLoop}).</li>
- * </ol>
- * <h3>Altre responsabilita' (v4.0)</h3>
- * <ul>
- *   <li>correzione manuale dei data movement con ricalcolo istantaneo ({@link #applyManualEdit});</li>
- *   <li>"Rimisura da VP": Visual Paradigm e' la Source of Truth ({@link #remeasureFromVp});</li>
- *   <li>persistenza del modello COSMIC nel file .vpp e riconciliazione all'apertura ({@link ProjectModelStore});</li>
- *   <li>configurazione dell'LLM da {@link CosmicSettings} (niente piu' parametri -Dcosmic.llm.*).</li>
- * </ul>
- * L'IDENTITA' dello use case (ID, nome, sottosistema, attori, include) viene dal pre-parsing del documento
- * ({@link UseCaseChunker}) e non transita mai dall'LLM: non puo' piu' essere persa o rimappata su "UC1/FP1".
- * Ogni chiamata contiene un solo use case (in media ~1.300 caratteri): niente piu' "Context Window Exceeded".
- *
- * <h3>Threading</h3>
- * Il thread di lavoro ({@code cosmic-ai-pipeline}) fa solo I/O (parsing, HTTP verso LM Studio). Tutto cio' che
- * tocca Visual Paradigm o Swing (modello, diagrammi, stereotipi, UI) gira sull'Event Dispatch Thread, UN use
- * case alla volta ({@code invokeAndWait}, che da' anche back-pressure): dopo ogni use case misurato il suo
- * diagramma viene aggiornato e i CFP ricalcolati, e tra due use case l'EDT e' libero di ridisegnare. Nessun
- * blocco da centinaia di elementi: l'IDE non si congela e il diagramma cresce sotto gli occhi dell'utente.
+ * Orchestratore del plugin COSMIC AI (v4.1 - Persistenza Chunk Fix).
  */
 public final class CosmicAiService {
 
     private static final CosmicAiService INSTANCE = new CosmicAiService();
     public static CosmicAiService getInstance() { return INSTANCE; }
 
-    // ---- configurazione LLM: endpoint, modello, API key e timeout vengono da CosmicSettings (tab "Impostazioni") ----
     private static final int LLM_MAX_ATTEMPTS = 3;
-    private static final long LLM_RETRY_BASE_MS = 5_000L;   // come lo script del professore: 5s, 10s, ...
-    /** Rete di sicurezza: uno scenario piu' lungo viene diviso (stesso use case). Albergate: max ~2.700. */
+    private static final long LLM_RETRY_BASE_MS = 5_000L;
     private static final int MAX_CHUNK_CHARS = 6000;
-    /** Dopo N use case consecutivi falliti (LM Studio spento?) l'analisi si interrompe con un messaggio chiaro. */
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
 
     private static final int PROJECT_WATCHER_INTERVAL_MS = 1500;
     private static final int DIAGRAM_SCOPE_WATCHER_INTERVAL_MS = 800;
     private static final int CHAT_HISTORY_MESSAGES = 16;
-    /** Dopo l'ultima modifica al modello si aspetta questo tempo prima di scriverlo nel progetto (accorpa i salvataggi). */
     private static final int PERSIST_DEBOUNCE_MS = 1500;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -118,13 +87,10 @@ public final class CosmicAiService {
     private final AtomicBoolean analysisRunning = new AtomicBoolean(false);
     private final AtomicBoolean cancelRequested = new AtomicBoolean(false);
 
-    /** > 0 mentre il plugin stesso crea/modifica elementi VP: i listener di sync ignorano i propri eventi. */
     private final AtomicInteger suppressSync = new AtomicInteger(0);
     private boolean recomputing;
     private int manualUseCaseCounter;
 
-    // ---- v4.0: persistenza nel .vpp ----
-    /** Il progetto VP a cui appartiene {@link #currentModel}: il modello non viene mai scritto in un altro progetto. */
     private IProject modelProject;
     private Timer persistTimer;
     private boolean persistDirty;
@@ -136,17 +102,15 @@ public final class CosmicAiService {
     private Timer diagramScopeWatcherTimer;
     private String lastActiveDiagramId;
 
-    // ---- stato dell'analisi corrente (scritto/letto SOLO sull'EDT, tranne i riferimenti volatile) ----
     private volatile CosmicJsonModel currentModel;
     private volatile CosmicReport lastReport;
-    private volatile List<UseCaseChunk> lastChunks = Collections.emptyList();
     private UseCaseDiagramGenerator activeGenerator;
     private Set<String> knownUseCaseIds = new HashSet<>();
 
-    private volatile CosmicAnalysisListener activeUiListener;   // dialog attualmente mostrato
-    private volatile CosmicAnalysisListener runListener;        // dialog che ha avviato l'analisi
+    private volatile CosmicAnalysisListener activeUiListener;
+    private volatile CosmicAnalysisListener runListener;
 
-    private final List<String[]> chatHistory = new ArrayList<>(); // {ruolo, testo}
+    private final List<String[]> chatHistory = new ArrayList<>();
 
     private CosmicAiService() {
         modelChangeListener.setOnModelAdded(this::handleModelElementAdded);
@@ -158,10 +122,6 @@ public final class CosmicAiService {
         modelChangeListener.setOnProjectPreSave(this::handleProjectPreSave);
     }
 
-    // ======================================================================
-    // Ciclo di vita
-    // ======================================================================
-
     public void start() {
         ensureExecutors();
         persistTimer = new Timer(PERSIST_DEBOUNCE_MS, e -> flushPersistence());
@@ -172,7 +132,7 @@ public final class CosmicAiService {
 
     public void stop() {
         cancelAnalysis();
-        runOnEdt(this::flushPersistence);       // ultimo salvataggio del modello nel progetto
+        runOnEdt(this::flushPersistence);
         if (persistTimer != null) { persistTimer.stop(); persistTimer = null; }
         if (projectWatcherTimer != null) { projectWatcherTimer.stop(); projectWatcherTimer = null; }
         if (diagramScopeWatcherTimer != null) { diagramScopeWatcherTimer.stop(); diagramScopeWatcherTimer = null; }
@@ -210,17 +170,12 @@ public final class CosmicAiService {
 
     public boolean isAnalysisRunning() { return analysisRunning.get(); }
 
-    /** Interrompe l'analisi in corso: gli use case gia' elaborati e disegnati restano (e sono esportabili). */
     public void cancelAnalysis() {
         if (!analysisRunning.get()) return;
         cancelRequested.set(true);
         Future<?> f = runningTask;
         if (f != null) f.cancel(true);
     }
-
-    // ======================================================================
-    // Watcher di progetto e di diagramma
-    // ======================================================================
 
     private void startProjectWatcher() {
         projectWatcherTimer = new Timer(PROJECT_WATCHER_INTERVAL_MS, e -> {
@@ -229,7 +184,7 @@ public final class CosmicAiService {
                 detachModelChangeListener();
                 if (currentProject != null) {
                     attachModelChangeListener(currentProject);
-                    loadPersistedModel(currentProject);        // v4.0: ripopola l'albero dal .vpp
+                    loadPersistedModel(currentProject);
                 }
             }
         });
@@ -266,10 +221,6 @@ public final class CosmicAiService {
         } catch (Exception ignored) { }
         watchedProject = null;
     }
-
-    // ======================================================================
-    // API pubblica: analisi
-    // ======================================================================
 
     public void analyzeDocument(File file, CosmicAnalysisListener listener) {
         if (file == null || !file.isFile()) {
@@ -319,7 +270,7 @@ public final class CosmicAiService {
     }
 
     private void failRun(CosmicAnalysisListener listener, Throwable ex) {
-        Thread.interrupted(); // se il thread era stato interrotto dall'annullamento, non bloccare le notifiche
+        Thread.interrupted();
         analysisRunning.set(false);
         SwingUtilities.invokeLater(() -> {
             listener.onBusyStateChanged(false);
@@ -331,7 +282,6 @@ public final class CosmicAiService {
         });
     }
 
-    /** Eccezione interna di annullamento (non e' un errore da mostrare). */
     private static final class AnalysisCancelled extends RuntimeException {
         private static final long serialVersionUID = 1L;
         AnalysisCancelled() { super("annullata", null, false, false); }
@@ -341,14 +291,9 @@ public final class CosmicAiService {
         if (cancelRequested.get() || Thread.currentThread().isInterrupted()) throw new AnalysisCancelled();
     }
 
-    // ----------------------------------------------------------------------
-    // Il loop principale (thread di lavoro)
-    // ----------------------------------------------------------------------
-
     private void runPipeline(String text, String projectName, CosmicAnalysisListener ui) throws Exception {
         final long t0 = System.currentTimeMillis();
 
-        // --- Smart chunking: un chunk per use case, con ID/nome originali ---
         UseCaseChunker.ChunkingResult chunking = UseCaseChunker.chunk(text);
         final List<UseCaseChunk> chunks = chunking.chunks;
         if (chunks.isEmpty()) throw new IOException("Nessun use case individuato nel documento.");
@@ -357,7 +302,6 @@ public final class CosmicAiService {
         postLog(ui, "Individuati " + total + " use case (strategia: " + chunking.strategy + ").");
         for (String w : chunking.warnings) postLog(ui, "ATTENZIONE: " + w);
 
-        // --- Sessione: modello vuoto + diagrammi (EDT) ---
         onEdtAndWait(() -> beginSession(projectName, chunks, ui));
 
         final CosmicCalculator calculator = new CosmicCalculator();
@@ -381,7 +325,6 @@ public final class CosmicAiService {
                 try {
                     measureChunk(chunk, label, doneBefore, total, eta, ui, measured);
                     if (measured.unusable) {
-                        // l'LLM risponde ma mai nel formato atteso: conta come use case fallito (le frasi restano, da correggere a mano)
                         failures++;
                         consecutiveFailures++;
                         failedIds.add(chunk.id);
@@ -406,7 +349,7 @@ public final class CosmicAiService {
                 if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
                     aborted = true;
                     abortReason = MAX_CONSECUTIVE_FAILURES + " use case consecutivi non misurabili: l'LLM non risponde o "
-                            + "e' mal configurato (LM Studio avviato? modello caricato? context length sufficiente?).";
+                            + "e' mal configurato.";
                     break;
                 }
             }
@@ -416,7 +359,6 @@ public final class CosmicAiService {
             abortReason = "interrotta dall'utente";
         }
 
-        // --- Chiusura (non bloccante: se il thread e' stato interrotto invokeAndWait fallirebbe) ---
         final boolean fAborted = aborted;
         final String fReason = abortReason;
         final int fProcessed = processed;
@@ -439,14 +381,9 @@ public final class CosmicAiService {
         return s + "s";
     }
 
-    // ----------------------------------------------------------------------
-    // Misura di un singolo use case: Step 1 (Split) + Step 2 (Measure)
-    // ----------------------------------------------------------------------
-
     private static final class Measured {
         final List<FunctionalProcess> functionalProcesses = new ArrayList<>();
         String error;
-        /** true se NESSUNA frase e' stata misurata (formato di risposta mai rispettato). */
         boolean unusable;
     }
 
@@ -459,10 +396,6 @@ public final class CosmicAiService {
         measureScenario(chunk.id, chunk.name, parts, label, done, total, eta, ui, out);
     }
 
-    /**
-     * Step 1 (Split) + Step 2 (Micro-Loop) su uno scenario testuale gia' diviso in parti. Usata sia dall'analisi del
-     * documento sia da "Rimisura da VP".
-     */
     private void measureScenario(String ucId, String ucName, List<String> parts, String label, int done, int total, String eta,
                                  CosmicAnalysisListener ui, Measured out) throws IOException, InterruptedException {
         List<FunctionalProcess> all = new ArrayList<>();
@@ -473,7 +406,6 @@ public final class CosmicAiService {
             String suffix = parts.size() > 1 ? " (parte " + (p + 1) + "/" + parts.size() + ")" : "";
             String part = trimNewlines(parts.get(p));
 
-            // STEP 1 - Split (SYSTEM_SPLIT_UC + USER_SPLIT)
             postProgress(ui, done, total, label + " - Step 1/2: split" + suffix + eta);
             String splitRaw = callLlmWithRetry(CosmicPrompts.SYSTEM_SPLIT_UC, CosmicPrompts.userSplit(part));
             String splitText = cleanSplitOutput(splitRaw, part);
@@ -481,7 +413,6 @@ public final class CosmicAiService {
                 postLog(ui, "[" + ucId + "] output dello Split vuoto: uso lo scenario originale per lo Step 2.");
             }
 
-            // STEP 2 - Micro-Loop: una chiamata LLM per frase
             final String partSuffix = suffix;
             CosmicMicroLoop loop = new CosmicMicroLoop(this::callLlmWithRetry, new CosmicMicroLoop.Observer() {
                 @Override public void onSentence(int index, int count, String sentence) {
@@ -512,7 +443,6 @@ public final class CosmicAiService {
         return s.substring(a, b);
     }
 
-    /** Pulisce l'output dello Split (fence markdown, eventuale "Split:" iniziale); se vuoto restituisce {@code original} (stesso riferimento). */
     private static String cleanSplitOutput(String raw, String original) {
         String t = stripMarkdownFences(raw).trim();
         t = t.replaceFirst("(?i)^split\\s*:\\s*", "").trim();
@@ -532,16 +462,15 @@ public final class CosmicAiService {
         for (SubProcess sp : fp.subProcesses) sp.step = n++;
     }
 
-    // ----------------------------------------------------------------------
-    // Sessione di analisi (EDT)
-    // ----------------------------------------------------------------------
-
     private void beginSession(String projectName, List<UseCaseChunk> chunks, CosmicAnalysisListener ui) {
         CosmicJsonModel model = new CosmicJsonModel();
         model.projectName = projectName;
+        // PERSISTENCE FIX: Salviamo i chunk originali direttamente nel modello per la serializzazione
+        model.originalChunks = new ArrayList<>(chunks);
+
         currentModel = model;
         modelProject = ApplicationManager.instance().getProjectManager().getProject();
-        lastChunks = new ArrayList<>(chunks);
+
         knownUseCaseIds = new HashSet<>();
         Set<String> subsystems = new HashSet<>();
         for (UseCaseChunk c : chunks) {
@@ -564,14 +493,12 @@ public final class CosmicAiService {
                 + "Il diagramma si costruisce man mano.");
     }
 
-    /** Misura -> modello -> diagramma -> CFP -> UI, per UN use case (EDT). */
     private void commitUseCase(UseCaseChunk chunk, Measured measured, int processed, int total, CosmicAnalysisListener ui) {
         CosmicJsonModel model = currentModel;
         if (model == null) return;
         suppressSync.incrementAndGet();
         try {
             UseCase uc = buildUseCase(chunk, measured, model);
-            // impronta di cio' che "Rimisura da VP" rileggera' dal campo Specification (vedi UseCaseDescription)
             uc.specFingerprint = UseCaseDescription.fingerprint(uc.name,
                     UseCaseDescription.specificationOf(UseCaseDescription.build(uc), uc.id));
             model.useCases.add(uc);
@@ -582,8 +509,8 @@ public final class CosmicAiService {
             UseCaseReport ucReport = findUseCaseReport(lastReport, uc.id);
 
             try {
-                activeGenerator.appendUseCase(model, uc);                 // rendering incrementale
-                VisualFeedbackApplier.applyToUseCase(uc, ucReport);       // <<CFP:N>> / <<Violation>>
+                activeGenerator.appendUseCase(model, uc);
+                VisualFeedbackApplier.applyToUseCase(uc, ucReport);
             } catch (Exception drawEx) {
                 ui.onLog("Errore nel disegno di [" + uc.id + "]: " + drawEx + " (i dati COSMIC sono comunque nel modello).");
             }
@@ -600,7 +527,7 @@ public final class CosmicAiService {
 
     private UseCase buildUseCase(UseCaseChunk chunk, Measured measured, CosmicJsonModel model) {
         UseCase uc = new UseCase();
-        uc.id = chunk.id;                       // identita' ORIGINALE dal documento, mai dall'LLM
+        uc.id = chunk.id;
         uc.name = chunk.name;
         uc.subsystem = chunk.subsystem;
         uc.specification = chunk.reference == null ? "" : "Riferimento nel documento: " + chunk.reference;
@@ -624,7 +551,6 @@ public final class CosmicAiService {
             n++;
         }
 
-        // Attori: quelli dichiarati nel documento; in assenza, il Functional User del primo Entry misurato.
         List<String> actorNames = new ArrayList<>(chunk.primaryActors);
         if (actorNames.isEmpty()) {
             String fu = firstEntryUser(uc.functionalProcesses.get(0));
@@ -692,10 +618,10 @@ public final class CosmicAiService {
             if (model != null) for (UseCase uc : model.useCases) if (uc.violation != null) violations++;
             StringBuilder sum = new StringBuilder();
             sum.append(aborted ? "Analisi INTERROTTA (" + abortReason + "): " : "Analisi completata: ")
-               .append(processed).append("/").append(total).append(" use case");
+                    .append(processed).append("/").append(total).append(" use case");
             if (lastReport != null) sum.append(", ").append(lastReport.totalCfp).append(" CFP totali");
             sum.append(", ").append(violations).append(" con violazioni COSMIC, ")
-               .append(failures).append(" non misurati, in ").append(formatDuration(System.currentTimeMillis() - t0)).append(".");
+                    .append(failures).append(" non misurati, in ").append(formatDuration(System.currentTimeMillis() - t0)).append(".");
             ui.onLog(sum.toString());
             if (!failedIds.isEmpty()) ui.onLog("Use case non misurati: " + String.join(", ", failedIds));
             int unmeasured = model == null ? 0 : countUnmeasuredSentences(model);
@@ -714,16 +640,6 @@ public final class CosmicAiService {
         }
     }
 
-    // ======================================================================
-    // Esportazione CSV
-    // ======================================================================
-
-    /**
-     * Esporta il report finale. Il file scelto ha lo stesso formato di prima (Use Case ID; Use Case Name; FP ID; FP Name;
-     * Entry; Exit; Read; Write; Total CFP; Warning) con in coda Triggering Event, Functional User e Subsystem.
-     * Accanto viene scritto {@code <nome>_dettaglio.csv}: la tabella "Measurement" del professore (FU, Sub-process, DG,
-     * OOI, DM, CFP per ogni frase) per confrontare con la Ground Truth anche a livello di data movement.
-     */
     public void exportToCsv(File file, CosmicAnalysisListener listener) {
         ensureExecutors();
         runOnEdt(() -> {
@@ -736,8 +652,8 @@ public final class CosmicAiService {
             final File detailFile = new File(file.getParentFile(), file.getName().replaceFirst("(?i)\\.csv$", "") + "_dettaglio.csv");
             auxExecutor.submit(() -> {
                 try {
-                    Files.write(file.toPath(), ("﻿" + summary).getBytes(StandardCharsets.UTF_8));
-                    Files.write(detailFile.toPath(), ("﻿" + detail).getBytes(StandardCharsets.UTF_8));
+                    Files.write(file.toPath(), ("\uFEFF" + summary).getBytes(StandardCharsets.UTF_8));
+                    Files.write(detailFile.toPath(), ("\uFEFF" + detail).getBytes(StandardCharsets.UTF_8));
                     SwingUtilities.invokeLater(() -> listener.onLog("Report esportato in: " + file.getAbsolutePath()
                             + "  (dettaglio per frase: " + detailFile.getName() + ")"));
                 } catch (IOException e) {
@@ -820,29 +736,23 @@ public final class CosmicAiService {
         return s;
     }
 
-    // ======================================================================
-    // Validazione Modello vs Requisiti
-    // ======================================================================
-
-    /**
-     * Confronta il modello CORRENTE (comprese le modifiche manuali dell'utente in VP) con i requisiti originali,
-     * use case per use case. E' un controllo deterministico (nessuna chiamata all'LLM): il documento completo non
-     * entra in una finestra di contesto, ma i chunk per use case si'. Il risultato e' consegnato sull'EDT.
-     */
     public void validateModelAgainstRequirements(Consumer<String> onResult, Consumer<Throwable> onError) {
         runOnEdt(() -> {
             try {
                 CosmicJsonModel model = currentModel;
-                List<UseCaseChunk> chunks = lastChunks;
                 if (model == null) {
                     onError.accept(new IllegalStateException("Nessuna analisi eseguita: carica un documento e premi Analizza."));
                     return;
                 }
-                if (chunks.isEmpty()) {
-                    onError.accept(new IllegalStateException("I requisiti originali non sono in memoria (il modello e' stato ripristinato "
-                            + "dal progetto o rimisurato da VP): la validazione richiede una nuova analisi del documento."));
+
+                // PERSISTENCE FIX: Usiamo i chunk salvati nel modello!
+                List<UseCaseChunk> chunks = model.originalChunks;
+
+                if (chunks == null || chunks.isEmpty()) {
+                    onError.accept(new IllegalStateException("I requisiti originali non sono in memoria (il progetto e' stato creato interamente a mano o caricato da un file antecedente alla versione 4.1). La validazione richiede un documento sorgente."));
                     return;
                 }
+
                 onResult.accept(buildValidationReport(model, chunks));
             } catch (Exception e) {
                 onError.accept(e);
@@ -919,10 +829,6 @@ public final class CosmicAiService {
 
     private static String safe(String s) { return s == null ? "" : s.trim(); }
 
-    // ======================================================================
-    // Chat con contesto del modello
-    // ======================================================================
-
     public void sendChatMessage(String userMessage, Consumer<String> onReply, Consumer<Throwable> onError) {
         ensureExecutors();
         runOnEdt(() -> {
@@ -930,8 +836,8 @@ public final class CosmicAiService {
             final List<String[]> messages = new ArrayList<>();
             messages.add(new String[]{"system",
                     "Sei l'assistente COSMIC AI integrato in Visual Paradigm. Rispondi in italiano, in modo conciso e preciso, "
-                    + "su misurazione COSMIC (Entry/Exit/Read/Write), Use Case e CFP. Usa SOLO i dati del modello qui sotto: "
-                    + "se un dato non c'e', dillo.\n\n=== MODELLO CORRENTE ===\n" + context});
+                            + "su misurazione COSMIC (Entry/Exit/Read/Write), Use Case e CFP. Usa SOLO i dati del modello qui sotto: "
+                            + "se un dato non c'e', dillo.\n\n=== MODELLO CORRENTE ===\n" + context});
             synchronized (chatHistory) { messages.addAll(chatHistory); }
             messages.add(new String[]{"user", userMessage});
             auxExecutor.submit(() -> {
@@ -956,14 +862,14 @@ public final class CosmicAiService {
         if (m == null || r == null || m.useCases.isEmpty()) return "Nessuna analisi eseguita: il modello e' vuoto.";
         StringBuilder sb = new StringBuilder();
         sb.append("Progetto: ").append(m.projectName).append(" | use case: ").append(m.useCases.size())
-          .append(" | CFP totali: ").append(r.totalCfp).append("\n");
+                .append(" | CFP totali: ").append(r.totalCfp).append("\n");
         Map<String, UseCaseReport> byId = new LinkedHashMap<>();
         for (UseCaseReport ur : r.useCases) byId.put(ur.id, ur);
         for (UseCase uc : m.useCases) {
             if (sb.length() > 6000) { sb.append("(elenco troncato)\n"); break; }
             UseCaseReport ur = byId.get(uc.id);
             sb.append("- [").append(uc.id).append("] ").append(uc.name).append(" | ")
-              .append(ur == null ? 0 : ur.totalCfp).append(" CFP");
+                    .append(ur == null ? 0 : ur.totalCfp).append(" CFP");
             if (uc.subsystem != null) sb.append(" | ").append(uc.subsystem);
             if (uc.violation != null) sb.append(" | VIOLAZIONE");
             sb.append("\n");
@@ -978,8 +884,8 @@ public final class CosmicAiService {
                 sb.append("  Triggering Event: ").append(fp.triggeringEvent).append("\n");
                 for (SubProcess sp : fp.subProcesses) {
                     sb.append("  ").append(sp.step).append(". ").append(sp.description).append(" [")
-                      .append(movementWord(sp.dataMovementType)).append(" | DG: ").append(sp.dataGroup)
-                      .append(" | OOI: ").append(sp.objectOfInterest).append("]\n");
+                            .append(movementWord(sp.dataMovementType)).append(" | DG: ").append(sp.dataGroup)
+                            .append(" | OOI: ").append(sp.objectOfInterest).append("]\n");
                 }
             }
             if (uc.violation != null) sb.append("  Violazione: ").append(uc.violation).append("\n");
@@ -987,10 +893,6 @@ public final class CosmicAiService {
         }
         return sb.toString();
     }
-
-    // ======================================================================
-    // Sincronizzazione real-time con le modifiche dell'utente su Visual Paradigm
-    // ======================================================================
 
     private void handleModelElementAdded(IModelElement element) {
         if (suppressSync.get() > 0 || currentModel == null) return;
@@ -1017,7 +919,6 @@ public final class CosmicAiService {
         });
     }
 
-    /** Rename in tempo reale (PropertyChangeListener del {@link CosmicModelChangeListener}). */
     private void handleElementPropertyChanged(IModelElement element, String propertyName) {
         if (suppressSync.get() > 0 || currentModel == null) return;
         SwingUtilities.invokeLater(() -> {
@@ -1051,7 +952,7 @@ public final class CosmicAiService {
             UseCase target = findUseCaseByVpObject(endOf(include, "getTo"));
             if (base == null || target == null) return;
             boolean changed = added ? (!base.includesIds.contains(target.id) && base.includesIds.add(target.id))
-                                    : base.includesIds.remove(target.id);
+                    : base.includesIds.remove(target.id);
             if (changed) recomputeAndPublish((added ? "Aggiunto" : "Rimosso") + " <<include>> " + base.id + " -> " + target.id + ".", null);
         });
     }
@@ -1059,7 +960,6 @@ public final class CosmicAiService {
     private void handleExtendChanged(IExtend extend, boolean added) {
         if (suppressSync.get() > 0 || currentModel == null) return;
         SwingUtilities.invokeLater(() -> {
-            // la freccia <<extend>> va dallo use case "estensione" (from) allo use case "base" (to)
             UseCase extension = findUseCaseByVpObject(endOf(extend, "getFrom"));
             UseCase base = findUseCaseByVpObject(endOf(extend, "getTo"));
             if (extension == null || base == null) return;
@@ -1080,7 +980,7 @@ public final class CosmicAiService {
     }
 
     private UseCase addUseCaseIfMissing(IUseCase vpUseCase) {
-        if (findUseCaseByVpElementId(vpUseCase) != null) return null;   // es. creato dal generatore: gia' tracciato
+        if (findUseCaseByVpElementId(vpUseCase) != null) return null;
         UseCase dto = new UseCase();
         dto.id = nextManualUseCaseId(currentModel);
         dto.name = safeTrim(vpUseCase.getName()).isEmpty() ? dto.id : safeTrim(vpUseCase.getName());
@@ -1104,7 +1004,6 @@ public final class CosmicAiService {
         return true;
     }
 
-    /** Associazione Attore <-> Use Case disegnata/cancellata a mano: aggiorna gli attori dello use case. Idempotente. */
     private boolean applyAssociation(IAssociation association, boolean added) {
         Object from = endOf(association, "getFrom");
         Object to = endOf(association, "getTo");
@@ -1153,7 +1052,6 @@ public final class CosmicAiService {
         return actor;
     }
 
-    /** Ricalcola i CFP dopo una modifica dell'utente, aggiorna lo stereotipo dello use case coinvolto e la UI. */
     private void recomputeAndPublish(String reason, UseCase affected) {
         if (currentModel == null || recomputing) return;
         recomputing = true;
@@ -1180,7 +1078,6 @@ public final class CosmicAiService {
         }
     }
 
-    /** CFP "nello scope" del diagramma attivo (Epic 3) + totale di progetto, verso la UI. Solo EDT. */
     private void publishCurrentScope() {
         CosmicAnalysisListener ui = activeUiListener;
         CosmicJsonModel model = currentModel;
@@ -1207,21 +1104,12 @@ public final class CosmicAiService {
 
     private static String safeTrim(String s) { return s == null ? "" : s.trim(); }
 
-    // ======================================================================
-    // v4.0 - Persistenza del modello COSMIC nel file .vpp
-    // ======================================================================
-
-    /** Segna il modello come modificato: verra' scritto nel progetto tra {@link #PERSIST_DEBOUNCE_MS} ms (EDT). */
     private void markDirty() {
         if (currentModel == null) return;
         persistDirty = true;
         if (persistTimer != null) persistTimer.restart();
     }
 
-    /**
-     * Scrive subito il modello nei Tagged Value del progetto, se e' cambiato. Solo EDT. Non scrive mai se il progetto
-     * attivo non e' quello a cui appartiene il modello (cambio progetto durante l'attesa del debounce).
-     */
     private void flushPersistence() {
         if (!persistDirty) return;
         CosmicJsonModel model = currentModel;
@@ -1234,9 +1122,9 @@ public final class CosmicAiService {
             persistDirty = false;
             lastPersistError = null;
         } catch (ProjectModelStore.StoreException | RuntimeException e) {
-            persistDirty = false;      // niente tempesta di tentativi: si riprova alla prossima modifica
+            persistDirty = false;
             String msg = e.getMessage() == null ? e.toString() : e.getMessage();
-            if (!msg.equals(lastPersistError)) {          // un solo avviso per errore, non uno per ogni salvataggio
+            if (!msg.equals(lastPersistError)) {
                 lastPersistError = msg;
                 CosmicAnalysisListener ui = uiListener();
                 String text = "ATTENZIONE: modello COSMIC NON salvato nel progetto (.vpp): " + msg;
@@ -1247,7 +1135,6 @@ public final class CosmicAiService {
         }
     }
 
-    /** Subito prima del salvataggio del .vpp: il file deve contenere il modello COSMIC aggiornato. */
     private void handleProjectPreSave(IProject project) {
         try {
             onEdtAndWait(() -> {
@@ -1264,14 +1151,9 @@ public final class CosmicAiService {
         SwingUtilities.invokeLater(() -> loadPersistedModel(project));
     }
 
-    /**
-     * Ripopola il modello dal progetto (se contiene un JSON COSMIC), lo riconcilia con quello che c'e' davvero sul
-     * canvas e lo pubblica sulla UI. Se il progetto non ha un modello salvato e prima era attivo quello di un altro
-     * progetto, lo stato viene azzerato (mai mescolare due progetti). Solo EDT; idempotente.
-     */
     private void loadPersistedModel(IProject project) {
         if (project == null || analysisRunning.get()) return;
-        if (modelProject == project && currentModel != null) return;     // il modello in memoria e' gia' quello di questo progetto
+        if (modelProject == project && currentModel != null) return;
         CosmicAnalysisListener ui = uiListener();
 
         String json = null;
@@ -1287,7 +1169,6 @@ public final class CosmicAiService {
                 boolean hadModel = currentModel != null;
                 currentModel = null;
                 lastReport = null;
-                lastChunks = Collections.emptyList();
                 knownUseCaseIds = new HashSet<>();
                 activeGenerator = null;
                 persistDirty = false;
@@ -1311,7 +1192,6 @@ public final class CosmicAiService {
 
         currentModel = model;
         modelProject = project;
-        lastChunks = Collections.emptyList();
         activeGenerator = null;
         knownUseCaseIds = new HashSet<>();
         for (UseCase uc : model.useCases) knownUseCaseIds.add(uc.id);
@@ -1331,7 +1211,6 @@ public final class CosmicAiService {
         publishCurrentScope();
     }
 
-    /** Chiamato dal dialog quando viene mostrato: se esiste gia' un modello (es. ripristinato dal .vpp) lo mostra subito. */
     public void publishCurrentModelTo(CosmicAnalysisListener listener) {
         runOnEdt(() -> {
             CosmicJsonModel model = currentModel;
@@ -1343,41 +1222,23 @@ public final class CosmicAiService {
         });
     }
 
-    // ----------------------------------------------------------------------
-    // Riconciliazione modello <-> progetto VP (Source of Truth = VP)
-    // ----------------------------------------------------------------------
-
-    /**
-     * Allinea {@code model} a quello che c'e' davvero sul canvas di VP:
-     * <ul>
-     *   <li>use case cancellati su VP (anche mentre il plugin era chiuso) -> rimossi dal modello, con le loro relazioni;</li>
-     *   <li>use case rinominati -> nome aggiornato; use case nuovi su VP -> aggiunti, NON misurati (si misurano con "Rimisura da VP");</li>
-     *   <li>relazioni &lt;&lt;include&gt;&gt;/&lt;&lt;extend&gt;&gt; e associazioni attore-use case -> ricostruite da VP.</li>
-     * </ul>
-     * Salvaguardie contro un'enumerazione fallita (che cancellerebbe dati veri): se nessuno degli use case salvati e'
-     * presente su VP non si rimuove nulla; se VP non restituisce alcuna relazione di un tipo, quelle del modello si conservano.
-     *
-     * @return true se il modello e' cambiato
-     */
     private boolean syncModelWithVp(IProject project, CosmicJsonModel model, List<String> notes) {
         boolean changed = false;
         VpProjectReader.Snapshot snap = VpProjectReader.read(project);
         Map<String, VpProjectReader.UseCaseSnap> vpById = new LinkedHashMap<>();
         for (VpProjectReader.UseCaseSnap u : snap.useCases) vpById.put(u.vpId, u);
 
-        // 1) use case cancellati su VP
         List<UseCase> gone = new ArrayList<>();
         int tracked = 0;
         for (UseCase uc : model.useCases) {
             if (uc.vpElementId == null) continue;
             tracked++;
             if (vpById.containsKey(uc.vpElementId)) continue;
-            IModelElement el = project.getModelElementById(uc.vpElementId);     // doppio controllo, indipendente dall'enumerazione
+            IModelElement el = project.getModelElementById(uc.vpElementId);
             if (!(el instanceof IUseCase)) gone.add(uc);
         }
         if (tracked > 0 && gone.size() == tracked) {
-            notes.add("nessuno degli use case salvati e' presente nel progetto (progetto non ancora caricato del tutto, o modello "
-                    + "appartenente a un altro file): non rimuovo nulla.");
+            notes.add("nessuno degli use case salvati e' presente nel progetto: non rimuovo nulla.");
             return false;
         }
         for (UseCase uc : gone) {
@@ -1394,7 +1255,6 @@ public final class CosmicAiService {
             notes.add(gone.size() + " use case non piu' presenti sul canvas, rimossi dal modello: " + ids);
         }
 
-        // 2) rinomine e use case nuovi
         Map<String, UseCase> byVp = new LinkedHashMap<>();
         for (UseCase uc : model.useCases) if (uc.vpElementId != null) byVp.put(uc.vpElementId, uc);
         int added = 0;
@@ -1416,10 +1276,8 @@ public final class CosmicAiService {
         }
         if (added > 0) notes.add(added + " use case presenti su VP ma non nel modello: aggiunti senza misura (usa 'Rimisura da VP').");
 
-        // 3) relazioni
         changed |= rebuildRelations(model, snap, byVp, notes);
 
-        // 4) attori eliminati da VP e non piu' referenziati
         Set<String> referenced = new HashSet<>();
         for (UseCase uc : model.useCases) {
             if (uc.primaryActorId != null) referenced.add(uc.primaryActorId);
@@ -1436,7 +1294,6 @@ public final class CosmicAiService {
     private boolean rebuildRelations(CosmicJsonModel model, VpProjectReader.Snapshot snap, Map<String, UseCase> byVp, List<String> notes) {
         boolean changed = false;
 
-        // <<include>>: from = use case base, to = use case incluso
         boolean modelHasIncludes = false;
         boolean modelHasExtends = false;
         for (UseCase uc : model.useCases) {
@@ -1457,7 +1314,6 @@ public final class CosmicAiService {
             notes.add("nessuna relazione <<include>> letta da VP: conservo quelle del modello.");
         }
 
-        // <<extend>>: from = use case estensione, to = use case base
         if (!snap.extendsLinks.isEmpty() || !modelHasExtends) {
             for (UseCase uc : model.useCases) {
                 if (uc.vpElementId == null) continue;
@@ -1483,7 +1339,6 @@ public final class CosmicAiService {
             notes.add("nessuna relazione <<extend>> letta da VP: conservo quelle del modello.");
         }
 
-        // associazioni attore - use case
         boolean modelHasActors = false;
         for (UseCase uc : model.useCases) if (uc.primaryActorId != null) modelHasActors = true;
         if (!snap.associations.isEmpty() || !modelHasActors) {
@@ -1555,21 +1410,6 @@ public final class CosmicAiService {
         return false;
     }
 
-    // ======================================================================
-    // v4.0 - Correzione manuale dei Data Movement (human-in-the-loop)
-    // ======================================================================
-
-    /** Campo di un sotto-processo modificabile dall'utente. */
-    public enum ManualField { FUNCTIONAL_USER, DATA_MOVEMENT, DATA_GROUP, OBJECT_OF_INTEREST }
-
-    /**
-     * Applica la correzione di UNA cella della tabella dei data movement, ricalcola SUBITO i CFP (nessuna chiamata
-     * all'LLM), aggiorna stereotipi {@code <<CFP:N>>}/{@code <<Violation>>} e descrizione dello use case su VP,
-     * notifica la UI e programma il salvataggio nel .vpp. Solo EDT. Rifiutata mentre un'analisi e' in corso.
-     *
-     * @param value per {@link ManualField#DATA_MOVEMENT}: Entry/Exit/Read/Write/E/X/R/W oppure "No data movement"/vuoto
-     * @return true se la modifica e' stata applicata (false: riga non trovata, valore non valido o nessun cambiamento)
-     */
     public boolean applyManualEdit(String ucId, String fpId, int step, ManualField field, String value) {
         CosmicJsonModel model = currentModel;
         if (model == null || analysisRunning.get()) return false;
@@ -1622,11 +1462,8 @@ public final class CosmicAiService {
         return s == null || s.trim().isEmpty() ? null : s.trim();
     }
 
-    // ======================================================================
-    // v4.0 - "Rimisura da VP": Visual Paradigm come Source of Truth
-    // ======================================================================
+    public enum ManualField { FUNCTIONAL_USER, DATA_MOVEMENT, DATA_GROUP, OBJECT_OF_INTEREST }
 
-    /** Uno use case letto da VP, con quello che serve per decidere se rimisurarlo. */
     private static final class RemeasureItem {
         final String ucId;
         final String name;
@@ -1643,15 +1480,6 @@ public final class CosmicAiService {
         }
     }
 
-    /**
-     * Rilegge dal canvas di VP nome e testo (campo Specification/Description) di OGNI use case, li invia alla pipeline
-     * Split + Micro-Loop e ricalcola l'albero; poi riallinea relazioni &lt;&lt;include&gt;&gt;/&lt;&lt;extend&gt;&gt;, attori ed
-     * eventuali use case cancellati con lo stato reale di VP.
-     *
-     * @param onlyChanged true: rimisura solo use case nuovi, con testo/nome modificato dall'ultima misura o con frasi non
-     *                    misurate; gli altri conservano la misura (comprese le correzioni manuali). false: rimisura tutto
-     *                    (le correzioni manuali vengono sovrascritte).
-     */
     public void remeasureFromVp(boolean onlyChanged, CosmicAnalysisListener listener) {
         if (!beginRun(listener, true)) return;
         runningTask = pipelineExecutor.submit(() -> {
@@ -1666,7 +1494,6 @@ public final class CosmicAiService {
     private void runRemeasure(boolean onlyChanged, CosmicAnalysisListener ui) throws Exception {
         final long t0 = System.currentTimeMillis();
 
-        // --- Fase 1 (EDT): fotografia di VP e piano di lavoro ---
         final List<RemeasureItem> items = new ArrayList<>();
         onEdtAndWait(() -> planRemeasure(onlyChanged, items, ui));
         final List<RemeasureItem> work = new ArrayList<>();
@@ -1708,8 +1535,7 @@ public final class CosmicAiService {
 
                 if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
                     aborted = true;
-                    abortReason = MAX_CONSECUTIVE_FAILURES + " use case consecutivi non misurabili: l'LLM non risponde o e' mal configurato "
-                            + "(controlla la tab Impostazioni e che il server sia avviato).";
+                    abortReason = MAX_CONSECUTIVE_FAILURES + " use case consecutivi non misurabili: l'LLM non risponde o e' mal configurato.";
                     break;
                 }
             }
@@ -1728,13 +1554,12 @@ public final class CosmicAiService {
         SwingUtilities.invokeLater(() -> finishRemeasure(ui, fDone, total, fFailures, fFailed, fAborted, fReason, t0));
     }
 
-    /** EDT: legge VP e prepara gli use case (nome aggiornato, nuovi use case creati nel modello). */
     private void planRemeasure(boolean onlyChanged, List<RemeasureItem> items, CosmicAnalysisListener ui) {
         IProject project = ApplicationManager.instance().getProjectManager().getProject();
         if (project == null) throw new IllegalStateException("Nessun progetto aperto in Visual Paradigm.");
         VpProjectReader.Snapshot snap = VpProjectReader.read(project);
         if (snap.useCases.isEmpty()) {
-            throw new IllegalStateException("Il progetto non contiene use case (oppure l'Open API non ha permesso di enumerarli).");
+            throw new IllegalStateException("Il progetto non contiene use case.");
         }
         CosmicJsonModel model = currentModel;
         if (model == null || modelProject != project) {
@@ -1742,7 +1567,6 @@ public final class CosmicAiService {
             model.projectName = "Progetto Visual Paradigm";
             currentModel = model;
             modelProject = project;
-            lastChunks = Collections.emptyList();
             knownUseCaseIds = new HashSet<>();
             manualUseCaseCounter = 0;
         }
@@ -1785,13 +1609,12 @@ public final class CosmicAiService {
         return false;
     }
 
-    /** EDT: sostituisce la misura di UN use case, ricalcola, aggiorna VP e l'albero (upsert del nodo). */
     private void commitRemeasured(RemeasureItem item, Measured measured, int done, int total, CosmicAnalysisListener ui) {
         CosmicJsonModel model = currentModel;
         if (model == null) return;
         UseCase uc = null;
         for (UseCase u : model.useCases) if (item.ucId.equals(u.id)) uc = u;
-        if (uc == null) return;                       // cancellato su VP durante la misura
+        if (uc == null) return;
         suppressSync.incrementAndGet();
         try {
             boolean keepOld = measured.functionalProcesses.isEmpty()
@@ -1823,7 +1646,7 @@ public final class CosmicAiService {
             calculator.applyViolationFlags(model, lastReport);
             UseCaseReport ucReport = findUseCaseReport(lastReport, uc.id);
             try {
-                VisualFeedbackApplier.applyToUseCase(uc, ucReport);     // <<CFP:N>> / <<Violation>> + blocco COSMIC nella descrizione
+                VisualFeedbackApplier.applyToUseCase(uc, ucReport);
             } catch (Exception drawEx) {
                 ui.onLog("Errore nell'aggiornamento di [" + uc.id + "] su VP: " + drawEx);
             }
@@ -1837,7 +1660,6 @@ public final class CosmicAiService {
         }
     }
 
-    /** EDT: riallinea relazioni/attori/use case cancellati con lo stato ATTUALE di VP (l'utente puo' aver lavorato durante la misura). */
     private void finishRemeasure(CosmicAnalysisListener ui, int done, int total, int failures, List<String> failedIds,
                                  boolean aborted, String abortReason, long t0) {
         CosmicJsonModel model = currentModel;
@@ -1859,12 +1681,12 @@ public final class CosmicAiService {
                 for (UseCase uc : model.useCases) {
                     try {
                         VisualFeedbackApplier.applyToUseCase(uc, findUseCaseReport(lastReport, uc.id));
-                    } catch (Exception ignored) { /* use case senza elemento su VP */ }
+                    } catch (Exception ignored) { }
                 }
             }
             StringBuilder sum = new StringBuilder();
             sum.append(aborted ? "Rimisura INTERROTTA (" + abortReason + "): " : "Rimisura completata: ")
-               .append(done).append("/").append(total).append(" use case misurati");
+                    .append(done).append("/").append(total).append(" use case misurati");
             if (lastReport != null) sum.append(", ").append(lastReport.totalCfp).append(" CFP totali");
             sum.append(", ").append(failures).append(" non riusciti, in ").append(formatDuration(System.currentTimeMillis() - t0)).append(".");
             ui.onLog(sum.toString());
@@ -1883,7 +1705,6 @@ public final class CosmicAiService {
         }
     }
 
-    /** Divide su confini di riga uno scenario piu' lungo di {@code max} caratteri (stesso use case, piu' parti). */
     static List<String> splitIntoParts(String text, int max) {
         List<String> parts = new ArrayList<>();
         if (text.length() <= max) { parts.add(text); return parts; }
@@ -1899,10 +1720,6 @@ public final class CosmicAiService {
         return parts;
     }
 
-    // ======================================================================
-    // Chiamate all'LLM (LM Studio, API OpenAI-compatibile)
-    // ======================================================================
-
     private static final class LlmHttpException extends IOException {
         private static final long serialVersionUID = 1L;
         final int status;
@@ -1912,7 +1729,6 @@ public final class CosmicAiService {
         }
     }
 
-    /** Configurazione non valida (es. URL malformato): errore non ritentabile. */
     private static final class LlmConfigException extends IOException {
         private static final long serialVersionUID = 1L;
         LlmConfigException(String message, Throwable cause) { super(message, cause); }
@@ -1920,9 +1736,9 @@ public final class CosmicAiService {
 
     private static String httpStatusHint(int status) {
         switch (status) {
-            case 400: return " - probabile 'context length' troppo piccolo in LM Studio (servono almeno 16384 token) oppure nome del modello errato (tab Impostazioni).";
-            case 401: case 403: return " - API key mancante o non valida (tab Impostazioni).";
-            case 404: return " - endpoint non trovato: controlla l'URL nella tab Impostazioni (di norma termina con /v1/chat/completions).";
+            case 400: return " - probabile 'context length' troppo piccolo in LM Studio o modello errato.";
+            case 401: case 403: return " - API key mancante o non valida.";
+            case 404: return " - endpoint non trovato.";
             default: return "";
         }
     }
@@ -1932,7 +1748,6 @@ public final class CosmicAiService {
         return t.length() <= max ? t : t.substring(0, max) + "...";
     }
 
-    /** Come lo script del professore: ritenta con backoff esponenziale (5s, 10s, ...), ma con un numero massimo di tentativi. */
     private String callLlmWithRetry(String systemPrompt, String userText) throws IOException, InterruptedException {
         IOException last = null;
         for (int attempt = 1; attempt <= LLM_MAX_ATTEMPTS; attempt++) {
@@ -1940,7 +1755,7 @@ public final class CosmicAiService {
             try {
                 return extractAssistantContent(callLlm(systemPrompt, userText));
             } catch (LlmConfigException e) {
-                throw e;    // URL non valido: riprovare non serve
+                throw e;
             } catch (LlmHttpException e) {
                 boolean retriable = e.status >= 500 || e.status == 408 || e.status == 429;
                 if (!retriable) {
@@ -1948,7 +1763,7 @@ public final class CosmicAiService {
                 }
                 last = e;
             } catch (IOException e) {
-                last = e;   // connessione rifiutata, timeout, risposta vuota...
+                last = e;
             }
             if (attempt < LLM_MAX_ATTEMPTS) Thread.sleep(LLM_RETRY_BASE_MS << (attempt - 1));
         }
@@ -1963,20 +1778,19 @@ public final class CosmicAiService {
     }
 
     private String callLlmMessages(List<String[]> messages) throws IOException, InterruptedException {
-        // Le impostazioni si rileggono a ogni richiesta: una modifica nella tab "Impostazioni" vale dalla chiamata successiva.
         CosmicSettings.Snapshot cfg = CosmicSettings.load();
         String requestBody = buildChatCompletionRequestJson(cfg.modelName, messages);
         HttpRequest.Builder builder;
         try {
             builder = HttpRequest.newBuilder().uri(URI.create(cfg.endpointUrl));
         } catch (IllegalArgumentException e) {
-            throw new LlmConfigException("URL dell'LLM non valido ('" + cfg.endpointUrl + "'): correggilo nella tab Impostazioni.", e);
+            throw new LlmConfigException("URL dell'LLM non valido ('" + cfg.endpointUrl + "').", e);
         }
         builder.timeout(Duration.ofSeconds(cfg.timeoutSec))
-               .header("Content-Type", "application/json")
-               .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8));
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8));
         if (cfg.hasApiKey()) {
-            builder.header("Authorization", "Bearer " + cfg.apiKey.trim());     // mai scritta nei log
+            builder.header("Authorization", "Bearer " + cfg.apiKey.trim());
         }
         HttpRequest request = builder.build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -1990,7 +1804,7 @@ public final class CosmicAiService {
         for (int i = 0; i < messages.size(); i++) {
             if (i > 0) sb.append(',');
             sb.append("{\"role\":\"").append(messages.get(i)[0]).append("\",\"content\":\"")
-              .append(escapeJson(messages.get(i)[1])).append("\"}");
+                    .append(escapeJson(messages.get(i)[1])).append("\"}");
         }
         sb.append("]}");
         return sb.toString();
@@ -2016,12 +1830,11 @@ public final class CosmicAiService {
         text = stripReasoningArtifacts(text);
         if (text.trim().isEmpty()) {
             Object finish = (first instanceof Map) ? ((Map<String, Object>) first).get("finish_reason") : null;
-            throw new IOException("risposta vuota dall'LLM (finish_reason=" + finish + "): il ragionamento del modello potrebbe aver esaurito il contesto");
+            throw new IOException("risposta vuota dall'LLM (finish_reason=" + finish + ")");
         }
         return text;
     }
 
-    /** Alcune build di LM Studio lasciano nel testo i marcatori "harmony" di gpt-oss o i blocchi di ragionamento. */
     private static String stripReasoningArtifacts(String text) {
         String t = text;
         int ch = t.lastIndexOf("<|channel|>final<|message|>");
@@ -2029,15 +1842,6 @@ public final class CosmicAiService {
         t = t.replaceAll("<\\|(?:return|end|start)\\|>", "");
         t = t.replaceAll("(?s)<think>.*?</think>", "");
         return t.trim();
-    }
-
-    private static String stripMarkdownFences(String content) {
-        String trimmed = content.trim();
-        if (!trimmed.startsWith("```")) return trimmed;
-        int firstNewline = trimmed.indexOf('\n');
-        String withoutOpeningFence = (firstNewline >= 0) ? trimmed.substring(firstNewline + 1) : trimmed;
-        int closingFenceIndex = withoutOpeningFence.lastIndexOf("```");
-        return (closingFenceIndex >= 0) ? withoutOpeningFence.substring(0, closingFenceIndex).trim() : withoutOpeningFence.trim();
     }
 
     private static String escapeJson(String s) {
@@ -2053,22 +1857,25 @@ public final class CosmicAiService {
                 case '\b': sb.append("\\b"); break;
                 case '\f': sb.append("\\f"); break;
                 default:
-                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c)); // caratteri di controllo invisibili di Word
+                    if (c < 0x20) sb.append(String.format("\\u%04x", (int) c));
                     else sb.append(c);
             }
         }
         return sb.toString();
     }
-
-    // ======================================================================
-    // Utilita' di threading
-    // ======================================================================
+    private static String stripMarkdownFences(String content) {
+        String trimmed = content.trim();
+        if (!trimmed.startsWith("```")) return trimmed;
+        int firstNewline = trimmed.indexOf('\n');
+        String withoutOpeningFence = (firstNewline >= 0) ? trimmed.substring(firstNewline + 1) : trimmed;
+        int closingFenceIndex = withoutOpeningFence.lastIndexOf("```");
+        return (closingFenceIndex >= 0) ? withoutOpeningFence.substring(0, closingFenceIndex).trim() : withoutOpeningFence.trim();
+    }
 
     private static void runOnEdt(Runnable r) {
         if (SwingUtilities.isEventDispatchThread()) r.run(); else SwingUtilities.invokeLater(r);
     }
 
-    /** Esegue sull'EDT e attende: back-pressure naturale (il prossimo use case parte dopo il disegno del precedente). */
     private static void onEdtAndWait(Runnable r) throws InterruptedException {
         if (SwingUtilities.isEventDispatchThread()) { r.run(); return; }
         try {
