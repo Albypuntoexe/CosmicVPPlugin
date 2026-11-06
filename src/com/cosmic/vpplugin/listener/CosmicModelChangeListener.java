@@ -67,6 +67,12 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
     /** Epic 4: invocato su aggiunta/rimozione manuale di una freccia <<extend>> (elemento, added). */
     private BiConsumer<IExtend, Boolean> onExtendChanged = (extend, added) -> { };
 
+    /** v4.0: progetto appena aperto (ricaricare il modello COSMIC salvato nel .vpp). */
+    private Consumer<IProject> onProjectAfterOpened = project -> { };
+
+    /** v4.0: subito prima del salvataggio del .vpp (scrivere il modello COSMIC aggiornato nei tagged value). */
+    private Consumer<IProject> onProjectPreSave = project -> { };
+
     /** Proprieta' che ci interessano davvero: evitiamo di reagire a ogni micro-evento grafico (bounds, colore, ecc.). */
     private static final Set<String> WATCHED_PROPERTIES = Collections.unmodifiableSet(
             Set.of("name", "Name"));
@@ -90,6 +96,14 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
         this.onIncludeChanged = (callback != null) ? callback : (include, added) -> { };
     }
 
+    public void setOnProjectAfterOpened(Consumer<IProject> callback) {
+        this.onProjectAfterOpened = (callback != null) ? callback : (project -> { });
+    }
+
+    public void setOnProjectPreSave(Consumer<IProject> callback) {
+        this.onProjectPreSave = (callback != null) ? callback : (project -> { });
+    }
+
     public void setOnExtendChanged(BiConsumer<IExtend, Boolean> callback) {
         this.onExtendChanged = (callback != null) ? callback : (extend, added) -> { };
     }
@@ -111,6 +125,7 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
     @Override
     public void projectAfterOpened(IProject project) {
         log("Progetto post-apertura completata: " + safeName(project));
+        try { onProjectAfterOpened.accept(project); } catch (RuntimeException e) { log("onProjectAfterOpened: " + e); }
     }
 
     @Override
@@ -120,7 +135,8 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
 
     @Override
     public void projectPreSave(IProject project) {
-        // Nessuna azione prevista: non blocchiamo/alteriamo il salvataggio.
+        // v4.0: scrive il modello COSMIC nel progetto PRIMA del salvataggio. Un errore qui non deve mai bloccare il salvataggio.
+        try { onProjectPreSave.accept(project); } catch (RuntimeException e) { log("onProjectPreSave: " + e); }
     }
 
     @Override

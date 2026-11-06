@@ -13,6 +13,13 @@ public interface CosmicAnalysisListener {
 
     void onLog(String message);
 
+    /**
+     * v4.0 - Chiamato PRIMA di {@link #onBusyStateChanged(boolean) onBusyStateChanged(true)} quando parte una
+     * misura. {@code incremental == true} per "Rimisura da VP": l'albero esistente va conservato e aggiornato use
+     * case per use case; {@code false} per una nuova analisi del documento (albero da azzerare).
+     */
+    default void onRunStarted(boolean incremental) {}
+
     void onBusyStateChanged(boolean busy);
 
     /**
@@ -39,6 +46,12 @@ public interface CosmicAnalysisListener {
         onLog(reason);
         onAnalysisCompleted(model, report);
     }
+
+    /**
+     * v4.0 - Il progetto attivo e' cambiato e quello nuovo non contiene un modello COSMIC salvato: l'albero e le
+     * tabelle vanno svuotati (mai mostrare dati di un altro progetto).
+     */
+    default void onModelCleared() {}
 
     void onAnalysisCompleted(CosmicJsonModel model, CosmicReport report);
 

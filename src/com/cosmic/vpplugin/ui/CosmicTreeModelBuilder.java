@@ -9,6 +9,7 @@ import com.cosmic.vpplugin.model.CosmicJsonModel.SubProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
 
 import javax.swing.tree.DefaultMutableTreeNode;
+import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -40,9 +41,59 @@ public final class CosmicTreeModelBuilder {
 
     private CosmicTreeModelBuilder() { }
 
+    /**
+     * v4.0 - Payload di ogni nodo (al posto della semplice stringa): la UI sa a quale use case / functional process
+     * appartiene il nodo selezionato senza dover interpretare l'etichetta, e puo' cosi' mostrare la tabella
+     * modificabile dei data movement, ritrovare un nodo dopo una ricostruzione e sostituirlo (upsert).
+     * {@link #toString()} restituisce l'etichetta, quindi JTree continua a mostrare lo stesso testo di prima.
+     */
+    public static final class NodeData {
+        public enum Kind { ROOT, USE_CASE, FUNCTIONAL_PROCESS, SUB_PROCESS, INFO }
+
+        public final Kind kind;
+        public final String ucId;     // null per ROOT
+        public final String fpId;     // non null solo per FP e sotto-processi
+        public final String label;
+
+        public NodeData(Kind kind, String ucId, String fpId, String label) {
+            this.kind = kind;
+            this.ucId = ucId;
+            this.fpId = fpId;
+            this.label = label;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private static DefaultMutableTreeNode node(NodeData.Kind kind, String ucId, String fpId, String label) {
+        return new DefaultMutableTreeNode(new NodeData(kind, ucId, fpId, label));
+    }
+
+    /** Payload di un nodo, o null se il nodo non e' stato costruito da questa classe (es. messaggio iniziale). */
+    public static NodeData dataOf(Object treeNode) {
+        if (treeNode instanceof DefaultMutableTreeNode) {
+            Object o = ((DefaultMutableTreeNode) treeNode).getUserObject();
+            if (o instanceof NodeData) return (NodeData) o;
+        }
+        return null;
+    }
+
+    /** Il figlio diretto di {@code root} che rappresenta lo use case {@code ucId}, o null. */
+    public static DefaultMutableTreeNode findUseCaseNode(DefaultMutableTreeNode root, String ucId) {
+        if (ucId == null) return null;
+        for (Enumeration<?> e = root.children(); e.hasMoreElements(); ) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) e.nextElement();
+            NodeData d = dataOf(child);
+            if (d != null && d.kind == NodeData.Kind.USE_CASE && ucId.equals(d.ucId)) return child;
+        }
+        return null;
+    }
+
     public static DefaultMutableTreeNode buildTree(CosmicJsonModel model, CosmicReport report) {
-        String rootLabel = "Progetto '" + model.projectName + "' - TOTALE: " + report.totalCfp + " CFP";
-        DefaultMutableTreeNode root = new DefaultMutableTreeNode(rootLabel);
+        DefaultMutableTreeNode root = node(NodeData.Kind.ROOT, null, null, rootLabel(model.projectName, report.totalCfp));
 
         Map<String, UseCaseReport> reportByUcId = new LinkedHashMap<>();
         for (UseCaseReport r : report.useCases) {
@@ -78,10 +129,10 @@ public final class CosmicTreeModelBuilder {
             ucLabel.append("  \u26A0 VIOLAZIONE");
         }
 
-        DefaultMutableTreeNode ucNode = new DefaultMutableTreeNode(ucLabel.toString());
+        DefaultMutableTreeNode ucNode = node(NodeData.Kind.USE_CASE, uc.id, null, ucLabel.toString());
 
         if (uc.functionalProcesses.isEmpty()) {
-            ucNode.add(new DefaultMutableTreeNode("(nessun Functional Process ancora mappato)"));
+            ucNode.add(node(NodeData.Kind.INFO, uc.id, null, "(nessun Functional Process ancora mappato)"));
             return ucNode;
         }
 
@@ -98,10 +149,10 @@ public final class CosmicTreeModelBuilder {
 
             String fpLabel = "FP [" + fp.fpId + "] " + fp.fpName + " -> " + fpCfp + " CFP"
                     + ((fpReport != null && fpReport.warning != null) ? "  \u26A0" : "");
-            DefaultMutableTreeNode fpNode = new DefaultMutableTreeNode(fpLabel);
+            DefaultMutableTreeNode fpNode = node(NodeData.Kind.FUNCTIONAL_PROCESS, uc.id, fp.fpId, fpLabel);
             ucNode.add(fpNode);
 
-            fpNode.add(new DefaultMutableTreeNode("Triggering Event: " + fp.triggeringEvent));
+            fpNode.add(node(NodeData.Kind.INFO, uc.id, fp.fpId, "Triggering Event: " + fp.triggeringEvent));
 
             for (SubProcess sp : fp.subProcesses) {
                 String dm = (sp.dataMovementType != null) ? sp.dataMovementType : "-";
@@ -112,11 +163,13 @@ public final class CosmicTreeModelBuilder {
                 if (sp.objectOfInterest != null) {
                     spLabel += " OOI:" + sp.objectOfInterest;
                 }
-                fpNode.add(new DefaultMutableTreeNode(spLabel));
+                if (sp.unmeasured) spLabel += "  \u26A0 NON MISURATA";
+                else if (sp.manuallyEdited) spLabel += "  \u270E modificata";
+                fpNode.add(node(NodeData.Kind.SUB_PROCESS, uc.id, fp.fpId, spLabel));
             }
 
             if (fpReport != null && fpReport.warning != null) {
-                fpNode.add(new DefaultMutableTreeNode("\u26A0 " + fpReport.warning));
+                fpNode.add(node(NodeData.Kind.INFO, uc.id, fp.fpId, "\u26A0 " + fpReport.warning));
             }
         }
         return ucNode;

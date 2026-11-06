@@ -108,6 +108,14 @@ public final class CosmicJsonModel {
         // --- v2.0: feedback visivo / warning (Epic 5) ---
         /** Messaggio di violazione corrente (regola COSMIC minima o requisito originario), null se nessuna. */
         public String violation;
+
+        // --- v4.0: sorgente di verita' = Visual Paradigm ---
+        /**
+         * Impronta (nome + testo della specifica, whitespace normalizzato) calcolata al momento dell'ULTIMA misura LLM.
+         * "Rimisura da VP" la confronta con l'impronta corrente del campo Specification: se coincide lo use case non e'
+         * stato toccato e la sua misura (comprese le correzioni manuali dell'utente) viene conservata.
+         */
+        public String specFingerprint;
     }
 
     public static final class FunctionalProcess {
@@ -130,5 +138,11 @@ public final class CosmicJsonModel {
         public String dataMovementType; // Entry (E) | Exit (X) | Read (R) | Write (W) | null
         public String dataGroup;        // null finche' non calcolato dal COSMIC Analyzer
         public String objectOfInterest; // null finche' non calcolato dal COSMIC Analyzer
+
+        // --- v4.0 ---
+        /** true se la misura LLM di QUESTA frase e' fallita (anche dopo il retry): va corretta a mano o rimisurata. */
+        public boolean unmeasured;
+        /** true se l'utente ha modificato a mano questa riga (human-in-the-loop). */
+        public boolean manuallyEdited;
     }
 }

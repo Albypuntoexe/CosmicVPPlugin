@@ -37,6 +37,10 @@ public final class VisualFeedbackApplier {
      * a UN solo use case. E' la variante usata dal rendering incrementale: dopo ogni use case misurato si tocca
      * solo la sua shape, invece di rifare tutti gli use case del diagramma (O(n^2) chiamate all'Open API).
      * Va invocato sul thread grafico (EDT).
+     *
+     * v4.0 - Usata anche dopo una correzione manuale di un data movement: oltre a stereotipi e nota di violazione
+     * riallinea il blocco "--- COSMIC Functional Processes" della descrizione (senza toccare la specifica) e, quando
+     * la violazione e' stata risolta, RIMUOVE la nota "[COSMIC AI - VIOLAZIONE]" (prima restava nel testo).
      */
     public static void applyToUseCase(UseCase ucDto, UseCaseReport cfpReport) {
         if (ucDto == null || ucDto.vpElementId == null) {
@@ -53,7 +57,8 @@ public final class VisualFeedbackApplier {
         IUseCase ucModel = (IUseCase) element;
         int cfp = (cfpReport != null) ? cfpReport.totalCfp : 0;
         applyCfpStereotype(ucModel, cfp);
-        applyViolationFeedback(ucModel, ucDto.violation);
+        applyViolationStereotype(ucModel, ucDto.violation);
+        syncDescription(ucModel, ucDto);
     }
 
     private static void applyCfpStereotype(IUseCase ucModel, int cfp) {
@@ -65,22 +70,34 @@ public final class VisualFeedbackApplier {
         }
     }
 
-    private static void applyViolationFeedback(IUseCase ucModel, String violationMessage) {
+    private static void applyViolationStereotype(IUseCase ucModel, String violationMessage) {
         boolean hasViolation = violationMessage != null && !violationMessage.isBlank();
         try {
             removeStereotypesWithPrefix(ucModel, VIOLATION_STEREOTYPE_PREFIX);
             if (hasViolation) {
                 ucModel.addStereotype(VIOLATION_STEREOTYPE_PREFIX);
-
-                // FIX: Controlliamo se la descrizione cambia davvero prima di sovrascriverla!
-                String currentDesc = ucModel.getDescription();
-                String newDesc = appendViolationNote(currentDesc, violationMessage);
-                if (!newDesc.equals(currentDesc)) {
-                    ucModel.setDescription(newDesc);
-                }
             }
         } catch (Exception ex) {
             System.out.println("[COSMIC AI][visual] Impossibile applicare lo stereotipo di violazione: " + ex);
+        }
+    }
+
+    /**
+     * Riscrive la descrizione solo se cambia davvero (evita eventi inutili): specifica invariata + blocco COSMIC
+     * aggiornato + nota di violazione se presente (se la violazione e' stata risolta la nota sparisce).
+     */
+    private static void syncDescription(IUseCase ucModel, UseCase ucDto) {
+        try {
+            String current = ucModel.getDescription();
+            String updated = UseCaseDescription.withCosmicBlock(current, ucDto);
+            if (ucDto.violation != null && !ucDto.violation.isBlank()) {
+                updated = UseCaseDescription.withViolationNote(updated, ucDto.violation);
+            }
+            if (!updated.strip().equals(current == null ? "" : current.strip())) {
+                ucModel.setDescription(updated);
+            }
+        } catch (Exception ex) {
+            System.out.println("[COSMIC AI][visual] Impossibile aggiornare la descrizione: " + ex);
         }
     }
 
@@ -95,25 +112,5 @@ public final class VisualFeedbackApplier {
                 element.removeStereotype(stereotype.getName());
             }
         }
-    }
-
-    private static String appendViolationNote(String currentDescription, String violationMessage) {
-        if (currentDescription == null) {
-            currentDescription = "";
-        }
-
-        // Cerca e rimuove perfettamente la vecchia nota, inclusi i due a-capo precedenti
-        int noteIndex = currentDescription.indexOf("\n\n[COSMIC AI - VIOLAZIONE]");
-        if (noteIndex >= 0) {
-            currentDescription = currentDescription.substring(0, noteIndex);
-        } else {
-            // Fallback nel caso in cui gli a-capo siano stati cancellati a mano
-            int fallbackIndex = currentDescription.indexOf("[COSMIC AI - VIOLAZIONE]");
-            if (fallbackIndex >= 0) {
-                currentDescription = currentDescription.substring(0, fallbackIndex).trim();
-            }
-        }
-
-        return currentDescription + "\n\n[COSMIC AI - VIOLAZIONE] " + violationMessage;
     }
 }

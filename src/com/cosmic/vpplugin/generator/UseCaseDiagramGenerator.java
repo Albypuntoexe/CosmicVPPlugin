@@ -3,8 +3,6 @@ package com.cosmic.vpplugin.generator;
 import com.cosmic.vpplugin.model.CosmicJsonModel;
 import com.cosmic.vpplugin.model.CosmicJsonModel.Actor;
 import com.cosmic.vpplugin.model.CosmicJsonModel.ExtendRelation;
-import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalProcess;
-import com.cosmic.vpplugin.model.CosmicJsonModel.SubProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
 
 import com.vp.plugin.ApplicationManager;
@@ -367,50 +365,11 @@ public final class UseCaseDiagramGenerator {
     // ------------------------------------------------------------------
 
     /**
-     * Testo del campo Description/Documentation dello Use Case: scenario, eccezioni/flussi alternativi e
-     * scomposizione in Functional Process COSMIC con i Data Movement misurati.
+     * Testo del campo Description dello Use Case. v4.0: la struttura (specifica modificabile + blocco COSMIC generato)
+     * e' definita in {@link UseCaseDescription}, cosi' "Rimisura da VP" e le correzioni manuali la leggono/riscrivono
+     * con la stessa logica.
      */
     private String buildDescription(UseCase uc) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("[").append(uc.id).append("] ").append(uc.name).append("\n");
-        if (uc.specification != null && !uc.specification.isBlank()) {
-            sb.append(uc.specification).append("\n");
-        }
-        sb.append("\n");
-
-        if (!uc.mainScenario.isEmpty()) {
-            sb.append("MAIN SCENARIO:\n");
-            int step = 1;
-            for (String s : uc.mainScenario) {
-                sb.append(step++).append(") ").append(s).append("\n");
-            }
-        }
-
-        if (!uc.exceptions.isEmpty()) {
-            sb.append("\nALTERNATIVE FLOWS / EXCEPTIONS:\n");
-            for (String e : uc.exceptions) {
-                sb.append("- ").append(e).append("\n");
-            }
-        }
-
-        if (!uc.functionalProcesses.isEmpty()) {
-            sb.append("\n--- COSMIC Functional Processes (").append(uc.functionalProcesses.size()).append(") ---\n");
-            for (FunctionalProcess fp : uc.functionalProcesses) {
-                sb.append("* FP [").append(fp.fpId).append("] ").append(fp.fpName).append("\n");
-                sb.append("  Triggering Event: ").append(fp.triggeringEvent).append("\n");
-                for (SubProcess sp : fp.subProcesses) {
-                    sb.append("    ").append(sp.step).append(". ").append(sp.description);
-                    if (sp.dataMovementType != null) {
-                        sb.append(" [").append(sp.dataMovementType)
-                          .append(" - DG:").append(sp.dataGroup)
-                          .append(" - OOI:").append(sp.objectOfInterest).append("]");
-                    } else {
-                        sb.append(" [No data movement]");
-                    }
-                    sb.append("\n");
-                }
-            }
-        }
-        return sb.toString();
+        return UseCaseDescription.build(uc);
     }
 }

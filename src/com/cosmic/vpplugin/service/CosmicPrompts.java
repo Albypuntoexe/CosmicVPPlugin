@@ -612,6 +612,65 @@ public final class CosmicPrompts {
             "\n\nIMPORTANT: your previous reply could not be parsed. Reply with the JSON object ONLY, " +
             "starting with '{' and ending with '}', with one entry in \"subProcesses\" for every numbered sentence.";
 
+    // ---------------------------------------------------------------- MICRO-LOOP (v4.0): UNA frase per chiamata
+
+    /**
+     * v4.0 - Addendum dello Step 2 per il Micro-Loop. Gli esempi few-shot del professore (SYSTEM_COSMIC_MEASURE)
+     * restano INTATTI: questa sezione cambia solo il COMPITO (una frase sola invece dell'intero processo) e il
+     * formato di risposta (un oggetto JSON piccolo). L'LLM non puo' piu' "riassumere" perche' deve rispondere
+     * su una sola frase; l'intero scenario e' presente solo come CONTESTO (serve a capire, ad esempio, che il
+     * click iniziale e' l'Entry del processo e che l'errore e' un messaggio gia' contato).
+     */
+    public static final String MICRO_MEASURE_ADDENDUM =
+            "\n\n###\n\n" +
+            "TASK AND OUTPUT FORMAT (this section overrides ONLY the task and the output format shown in the examples above):\n" +
+            "You will receive the complete numbered scenario of ONE functional process, but ONLY AS CONTEXT. One line of the scenario is marked " +
+            "with '>>>' and repeated as TARGET SENTENCE. Measure ONLY the target sentence: do NOT measure, summarize or mention any other sentence. " +
+            "Apply EXACTLY the same measurement rules, the same Data Movement identification and the same reasoning shown in the examples above.\n" +
+            "Quick reminder of the rules used in the examples (they are not new rules):\n" +
+            "- Entry (E): the functional user (a person or an external system) gives data to the system: enters or fills in data, selects/presses a button " +
+            "\"relating to\" a specific item of interest (the identifier of the item enters), replies with data, a timer/event arrives with data.\n" +
+            "- Exit (X): the system gives data to a functional user (displays, shows, lists, prints, sends a request or a command to another system). " +
+            "Error, warning and confirmation messages are Exit with DG \"Messages\" and OOI \"Message\" (they are counted only once per functional process by the application).\n" +
+            "- Read (R): the system retrieves data from persistent storage (searches, reads, looks up, checks whether something already exists or is occupied).\n" +
+            "- Write (W): the system creates, updates, deletes or stores data in persistent storage.\n" +
+            "- No data movement: navigation or clicks that carry no data (selecting a menu sub-option, pressing Save/Cancel/Continue), validations of data already " +
+            "entered (formats, lengths, ranges), browsing, flow control (\"The flow of events ends/resumes ...\").\n" +
+            "The scenario has already been split into atomic sentences: the target sentence has AT MOST ONE data movement.\n" +
+            "Return ONLY one valid JSON object (no markdown fences, no comments, no explanation) with exactly this structure:\n" +
+            "{\n" +
+            "  \"functionalUser\": \"<the FU of the data movement, or null>\",\n" +
+            "  \"dataMovementType\": \"<E | X | R | W, or null when the target sentence has \\\"No data movement\\\">\",\n" +
+            "  \"dataGroup\": \"<DG or null>\",\n" +
+            "  \"objectOfInterest\": \"<OOI or null>\"\n" +
+            "}\n" +
+            "E = Entry, X = Exit, R = Read, W = Write. Use null (not a string) for fields that do not apply. Use double quotes only and no trailing commas.\n";
+
+    /** Prompt di sistema del Micro-Loop: esempi del professore + addendum a frase singola. */
+    public static String systemMicroMeasure() {
+        return SYSTEM_COSMIC_MEASURE + MICRO_MEASURE_ADDENDUM;
+    }
+
+    /**
+     * Messaggio utente del Micro-Loop. Ordine voluto: la parte variabile sta in fondo, cosi' il prefisso
+     * (prompt di sistema da ~4k token) resta identico tra le chiamate e LM Studio puo' riusare la cache del prompt.
+     *
+     * @param ucName         nome del functional process
+     * @param numberedContext l'intero scenario numerato, con la riga target gia' marcata da '>>> '
+     * @param targetIndex    numero (nel contesto) della frase target
+     * @param target         testo della frase target
+     */
+    public static String userMeasureSentence(String ucName, String numberedContext, int targetIndex, String target) {
+        return "FP \"" + ucName + "\":\n" + numberedContext + "\n\n" +
+                "TARGET SENTENCE (line " + targetIndex + "): " + target + "\n\n" +
+                "Measure ONLY the target sentence and return ONLY the JSON object.";
+    }
+
+    /** Promemoria del secondo tentativo (a temperature 0 lo stesso prompt darebbe la stessa risposta). */
+    public static final String USER_MICRO_STRICT_SUFFIX =
+            "\n\nIMPORTANT: your previous reply could not be parsed. Reply with the JSON object ONLY, starting with '{' and ending with '}', " +
+            "with the keys functionalUser, dataMovementType, dataGroup, objectOfInterest. dataMovementType must be exactly one of \"E\", \"X\", \"R\", \"W\" or null.";
+
     /** Prompt di sistema completo dello Step 2 (SYSTEM_COSMIC_MEASURE del professore + addendum JSON). */
     public static String systemCosmicMeasureJson() {
         return SYSTEM_COSMIC_MEASURE + JSON_OUTPUT_ADDENDUM;
