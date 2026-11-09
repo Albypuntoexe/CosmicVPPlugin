@@ -73,6 +73,9 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
     /** v4.0: subito prima del salvataggio del .vpp (scrivere il modello COSMIC aggiornato nei tagged value). */
     private Consumer<IProject> onProjectPreSave = project -> { };
 
+    /** v4.1: dopo il salvataggio del .vpp (il file esiste: si puo' scrivere il sidecar anche per un progetto nuovo). */
+    private Consumer<IProject> onProjectSaved = project -> { };
+
     /** Proprieta' che ci interessano davvero: evitiamo di reagire a ogni micro-evento grafico (bounds, colore, ecc.). */
     private static final Set<String> WATCHED_PROPERTIES = Collections.unmodifiableSet(
             Set.of("name", "Name"));
@@ -98,6 +101,10 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
 
     public void setOnProjectAfterOpened(Consumer<IProject> callback) {
         this.onProjectAfterOpened = (callback != null) ? callback : (project -> { });
+    }
+
+    public void setOnProjectSaved(Consumer<IProject> callback) {
+        this.onProjectSaved = (callback != null) ? callback : (project -> { });
     }
 
     public void setOnProjectPreSave(Consumer<IProject> callback) {
@@ -141,7 +148,7 @@ public class CosmicModelChangeListener implements IProjectListener, IProjectDiag
 
     @Override
     public void projectSaved(IProject project) {
-        // Nessuna azione prevista in questa fase.
+        try { onProjectSaved.accept(project); } catch (RuntimeException e) { log("onProjectSaved: " + e); }
     }
 
     // ==================================================================

@@ -483,6 +483,37 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         setChatBusy(true);
         CosmicAiService.getInstance().validateModelAgainstRequirements(
                 report -> { appendChat("Validazione", report); setChatBusy(false); },
+                err -> {
+                    if (err instanceof CosmicAiService.RequirementsMissingException) {
+                        offerReattachRequirements(err.getMessage());   // modello senza requisiti salvati: si ricollega il documento
+                    } else {
+                        appendChat("Errore", String.valueOf(err.getMessage()));
+                        setChatBusy(false);
+                    }
+                });
+    }
+
+    /**
+     * Il modello (es. salvato con una versione precedente, o rimisurato da VP) non ha requisiti associati: invece di
+     * un errore senza uscita si chiede il documento. Si usa quello gia' caricato nella tab Analisi, se c'e', altrimenti
+     * si apre il selettore file. Nessuna nuova misura: solo estrazione del testo + salvataggio nel sidecar.
+     */
+    private void offerReattachRequirements(String reason) {
+        File doc = pendingRequirementsFile;
+        if (doc == null) {
+            JFileChooser chooser = ApplicationManager.instance().getViewManager().createJFileChooser();
+            chooser.setDialogTitle("Seleziona il documento dei requisiti da ricollegare al modello");
+            chooser.setFileFilter(new FileNameExtensionFilter("Requisiti (*.docx, *.pdf, *.txt)", "docx", "pdf", "txt"));
+            if (chooser.showOpenDialog(ApplicationManager.instance().getViewManager().getRootFrame()) != JFileChooser.APPROVE_OPTION) {
+                appendChat("Sistema", reason);
+                setChatBusy(false);
+                return;
+            }
+            doc = chooser.getSelectedFile();
+        }
+        appendChat("Sistema", "Ricollego i requisiti dal documento '" + doc.getName() + "' (nessuna nuova misura)...");
+        CosmicAiService.getInstance().attachRequirementsDocument(doc,
+                report -> { appendChat("Validazione", report); setChatBusy(false); },
                 err -> { appendChat("Errore", String.valueOf(err.getMessage())); setChatBusy(false); });
     }
 

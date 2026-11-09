@@ -47,6 +47,16 @@ public final class UseCaseChunk {
     /** Numero di righe-frase dello scenario (atteso minimo di sotto-processi: lo Split puo' solo aumentarle). */
     public final int sentenceCount;
 
+    /**
+     * v4.1 - Ricostruisce un chunk salvato nel sidecar (requisiti originali persistiti). Passa dal costruttore normale,
+     * quindi {@link #mainSentences}, {@link #otherSentences} e {@link #sentenceCount} sono ricalcolati come all'import
+     * del documento: nessun parsing viene duplicato o modificato.
+     */
+    public static UseCaseChunk restore(int index, String id, String name, String reference, String subsystem,
+                                       List<String> primaryActors, List<String> includedIds, List<String> scenarioLines) {
+        return new UseCaseChunk(index, id, name, reference, subsystem, primaryActors, includedIds, scenarioLines);
+    }
+
     UseCaseChunk(int index, String id, String name, String reference, String subsystem,
                  List<String> primaryActors, List<String> includedIds, List<String> scenarioLines) {
         this.index = index;

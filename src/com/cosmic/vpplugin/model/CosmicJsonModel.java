@@ -61,7 +61,6 @@ public final class CosmicJsonModel {
     public String projectName;
     public List<Actor> actors = new ArrayList<>();
     public List<UseCase> useCases = new ArrayList<>();
-    public List<com.cosmic.vpplugin.document.UseCaseChunk> originalChunks = new ArrayList<>();
 
     // ---------------------------------------------------------------
 

@@ -1,5 +1,6 @@
 package com.cosmic.vpplugin.model;
 
+import com.cosmic.vpplugin.document.UseCaseChunk;
 import com.cosmic.vpplugin.json.MiniJsonParser;
 import com.cosmic.vpplugin.model.CosmicJsonModel.Actor;
 import com.cosmic.vpplugin.model.CosmicJsonModel.ExtendRelation;
@@ -7,6 +8,8 @@ import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.SubProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -23,8 +26,12 @@ import java.util.Map;
  */
 public final class CosmicModelSerializer {
 
-    /** Versione dello schema di persistenza (da incrementare se un campo cambia significato). */
-    public static final int SCHEMA_VERSION = 1;
+    /**
+     * Versione dello schema di persistenza (da incrementare se un campo cambia significato).
+     * v2 (plugin 4.1): aggiunge la sezione "requirements" (requisiti originali per "Valida Modello vs Requisiti").
+     * I file v1 si leggono senza problemi: semplicemente non hanno requisiti.
+     */
+    public static final int SCHEMA_VERSION = 2;
 
     private CosmicModelSerializer() { }
 
@@ -33,6 +40,15 @@ public final class CosmicModelSerializer {
     // ======================================================================
 
     public static String toJson(CosmicJsonModel m) {
+        return toJson(m, Collections.<UseCaseChunk>emptyList());
+    }
+
+    /**
+     * Serializza modello E requisiti originali (i chunk estratti dal documento). I requisiti vivono nel sidecar e non
+     * dentro {@link CosmicJsonModel}: il modello resta un contenitore di sola misura e il parsing del documento
+     * ({@code UseCaseChunk}) non viene toccato.
+     */
+    public static String toJson(CosmicJsonModel m, List<UseCaseChunk> requirements) {
         StringBuilder sb = new StringBuilder(64 * 1024);
         sb.append("{\n");
         field(sb, 1, "schemaVersion", SCHEMA_VERSION).append(",\n");
@@ -49,6 +65,14 @@ public final class CosmicModelSerializer {
         }
         sb.append(m.actors.isEmpty() ? "],\n" : "\n  ],\n");
 
+        sb.append("  \"requirements\": [");
+        List<UseCaseChunk> reqs = requirements == null ? Collections.<UseCaseChunk>emptyList() : requirements;
+        for (int i = 0; i < reqs.size(); i++) {
+            sb.append(i == 0 ? "\n" : ",\n");
+            writeChunk(sb, reqs.get(i));
+        }
+        sb.append(reqs.isEmpty() ? "],\n" : "\n  ],\n");
+
         sb.append("  \"useCases\": [");
         for (int i = 0; i < m.useCases.size(); i++) {
             sb.append(i == 0 ? "\n" : ",\n");
@@ -57,6 +81,19 @@ public final class CosmicModelSerializer {
         sb.append(m.useCases.isEmpty() ? "]\n" : "\n  ]\n");
         sb.append("}\n");
         return sb.toString();
+    }
+
+    private static void writeChunk(StringBuilder sb, UseCaseChunk c) {
+        sb.append("    {\n");
+        field(sb, 3, "index", c.index).append(",\n");
+        field(sb, 3, "id", c.id).append(",\n");
+        field(sb, 3, "name", c.name).append(",\n");
+        field(sb, 3, "reference", c.reference).append(",\n");
+        field(sb, 3, "subsystem", c.subsystem).append(",\n");
+        stringArray(sb, 3, "primaryActors", c.primaryActors).append(",\n");
+        stringArray(sb, 3, "includedIds", c.includedIds).append(",\n");
+        stringArray(sb, 3, "scenarioLines", c.scenarioLines).append("\n");
+        sb.append("    }");
     }
 
     private static void writeUseCase(StringBuilder sb, UseCase uc) {
@@ -183,6 +220,30 @@ public final class CosmicModelSerializer {
             if (uc.id != null) m.useCases.add(uc);     // senza id lo use case non e' riagganciabile: scartato
         }
         return m;
+    }
+
+    /**
+     * Requisiti originali salvati insieme al modello; lista vuota se il file e' di una versione precedente o l'analisi
+     * non e' mai partita da un documento. Un chunk non ricostruibile viene scartato, non fa fallire il ripristino.
+     */
+    public static List<UseCaseChunk> chunksFromJson(String json) {
+        Map<String, Object> root = MiniJsonParser.parseObject(json);
+        List<UseCaseChunk> out = new ArrayList<>();
+        for (Object o : list(root.get("requirements"))) {
+            Map<String, Object> c = map(o);
+            if (c == null) continue;
+            String id = str(c.get("id"), null);
+            if (id == null) continue;
+            List<String> actors = new ArrayList<>(), includes = new ArrayList<>(), lines = new ArrayList<>();
+            strings(c.get("primaryActors"), actors);
+            strings(c.get("includedIds"), includes);
+            strings(c.get("scenarioLines"), lines);
+            try {
+                out.add(UseCaseChunk.restore((int) num(c.get("index"), out.size() + 1), id, str(c.get("name"), ""),
+                        str(c.get("reference"), null), str(c.get("subsystem"), null), actors, includes, lines));
+            } catch (RuntimeException ignored) { /* chunk malformato: scartato */ }
+        }
+        return out;
     }
 
     // ======================================================================
