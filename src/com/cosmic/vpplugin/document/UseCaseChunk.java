@@ -34,6 +34,15 @@ public final class UseCaseChunk {
     public final String reference;
     /** Modulo / sottosistema (titolo di livello piu' alto che contiene lo use case), null se non disponibile. */
     public final String subsystem;
+    /**
+     * v5.0 - AREA FUNZIONALE (raggruppamento genitore dello use case nel documento), es. "F-PRE-04: Commissioned rooms
+     * management"; null se il documento non ne ha. Dipende SOLO dalla struttura dei titoli: l'LLM non la vede.
+     */
+    public final String functionalArea;
+    /** Codice dell'area ("F-PRE-04", "F-PRE-07, 05, 06"), null se il titolo non ne ha. */
+    public final String functionalAreaRef;
+    /** Nome dell'area senza codice ("Commissioned rooms management"), null se il titolo non ne ha. */
+    public final String functionalAreaName;
     /** Attori primari dichiarati nel documento (riga "Primary actor"), in ordine; vuota se non dichiarati. */
     public final List<String> primaryActors;
     /** ID degli use case citati con "Include UC-..." (non ancora validati contro l'elenco dei chunk). */
@@ -54,16 +63,29 @@ public final class UseCaseChunk {
      */
     public static UseCaseChunk restore(int index, String id, String name, String reference, String subsystem,
                                        List<String> primaryActors, List<String> includedIds, List<String> scenarioLines) {
-        return new UseCaseChunk(index, id, name, reference, subsystem, primaryActors, includedIds, scenarioLines);
+        return restore(index, id, name, reference, subsystem, null, null, primaryActors, includedIds, scenarioLines);
+    }
+
+    /** v5.0 - Come sopra, con l'area funzionale (i file di persistenza precedenti non l'hanno: arriva null). */
+    public static UseCaseChunk restore(int index, String id, String name, String reference, String subsystem,
+                                       String functionalAreaRef, String functionalAreaName,
+                                       List<String> primaryActors, List<String> includedIds, List<String> scenarioLines) {
+        return new UseCaseChunk(index, id, name, reference, subsystem, functionalAreaRef, functionalAreaName,
+                primaryActors, includedIds, scenarioLines);
     }
 
     UseCaseChunk(int index, String id, String name, String reference, String subsystem,
+                 String functionalAreaRef, String functionalAreaName,
                  List<String> primaryActors, List<String> includedIds, List<String> scenarioLines) {
         this.index = index;
         this.id = id;
         this.name = name;
         this.reference = reference;
         this.subsystem = subsystem;
+        this.functionalAreaRef = blankToNull(functionalAreaRef);
+        this.functionalAreaName = blankToNull(functionalAreaName);
+        this.functionalArea = this.functionalAreaRef == null ? this.functionalAreaName
+                : (this.functionalAreaName == null ? this.functionalAreaRef : this.functionalAreaRef + ": " + this.functionalAreaName);
         this.primaryActors = Collections.unmodifiableList(new ArrayList<>(primaryActors));
         this.includedIds = Collections.unmodifiableList(new ArrayList<>(includedIds));
         this.scenarioLines = Collections.unmodifiableList(new ArrayList<>(scenarioLines));
@@ -94,6 +116,10 @@ public final class UseCaseChunk {
         this.mainSentences = Collections.unmodifiableList(main);
         this.otherSentences = Collections.unmodifiableList(other);
         this.sentenceCount = count;
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.trim().isEmpty() ? null : s.trim();
     }
 
     private static String lastCell(String rest) {
@@ -180,6 +206,7 @@ public final class UseCaseChunk {
 
     @Override
     public String toString() {
-        return "[" + id + "] " + name + (subsystem != null ? " (" + subsystem + ")" : "");
+        return "[" + id + "] " + name + (functionalArea != null ? " (" + functionalArea + ")"
+                : subsystem != null ? " (" + subsystem + ")" : "");
     }
 }

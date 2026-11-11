@@ -1,6 +1,7 @@
 package com.cosmic.vpplugin.calculator;
 
 import com.cosmic.vpplugin.model.CosmicJsonModel;
+import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalArea;
 import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.SubProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
@@ -35,8 +36,14 @@ import java.util.Set;
  *
  *  - Un singolo Use Case puo' generare piu' Functional Process (mai un
  *    rapporto 1:1 imposto): il totale per Use Case e' semplicemente la somma
- *    dei CFP dei suoi FP, cosi' come il totale di progetto e' la somma dei
- *    CFP di tutti gli Use Case.
+ *    dei CFP dei suoi FP; il totale di AREA FUNZIONALE e' la somma dei suoi
+ *    Use Case; il totale di progetto e' la somma dei totali di area.
+ *
+ *  - v5.0: il report e' RAGGRUPPATO PER AREA FUNZIONALE ({@link AreaReport}),
+ *    come la struttura del modello ({@code Project -> FunctionalArea ->
+ *    UseCase}). Ogni use case appartiene a una sola area, quindi uno use case
+ *    mostrato anche su altri diagrammi (vista ausiliaria di un
+ *    &lt;&lt;include&gt;&gt; cross-area) NON viene mai contato due volte.
  *
  * La classe e' interamente "stateless" per {@link #compute}: ogni chiamata
  * riceve il modello e restituisce un nuovo {@link CosmicReport}, senza
@@ -78,20 +85,30 @@ public final class CosmicCalculator {
     public CosmicReport computeScoped(CosmicJsonModel model, Set<String> useCaseIdsInScope) {
         CosmicReport report = new CosmicReport(model.projectName);
 
-        for (UseCase uc : model.useCases) {
-            if (useCaseIdsInScope != null && !useCaseIdsInScope.contains(uc.id)) {
-                continue;
-            }
-            UseCaseReport ucReport = new UseCaseReport(uc.id, uc.name);
+        for (FunctionalArea area : model.functionalAreas()) {
+            AreaReport areaReport = new AreaReport(area.id, area.name, area.subsystem, area.label());
 
-            for (FunctionalProcess fp : uc.functionalProcesses) {
-                FunctionalProcessReport fpReport = computeFunctionalProcess(fp);
-                ucReport.functionalProcesses.add(fpReport);
-                ucReport.totalCfp += fpReport.totalCfp;
+            for (UseCase uc : area.useCases()) {
+                if (useCaseIdsInScope != null && !useCaseIdsInScope.contains(uc.id)) {
+                    continue;
+                }
+                UseCaseReport ucReport = new UseCaseReport(uc.id, uc.name);
+
+                for (FunctionalProcess fp : uc.functionalProcesses) {
+                    FunctionalProcessReport fpReport = computeFunctionalProcess(fp);
+                    ucReport.functionalProcesses.add(fpReport);
+                    ucReport.totalCfp += fpReport.totalCfp;
+                }
+
+                areaReport.useCases.add(ucReport);
+                areaReport.totalCfp += ucReport.totalCfp;
             }
 
-            report.useCases.add(ucReport);
-            report.totalCfp += ucReport.totalCfp;
+            if (areaReport.useCases.isEmpty()) {
+                continue;     // area senza use case (o nessuno nello scope): niente riga vuota
+            }
+            report.areas.add(areaReport);
+            report.totalCfp += areaReport.totalCfp;
         }
 
         return report;
@@ -108,10 +125,10 @@ public final class CosmicCalculator {
      */
     public void applyViolationFlags(CosmicJsonModel model, CosmicReport report) {
         Map<String, UseCaseReport> byId = new LinkedHashMap<>();
-        for (UseCaseReport r : report.useCases) {
+        for (UseCaseReport r : report.allUseCases()) {
             byId.put(r.id, r);
         }
-        for (UseCase uc : model.useCases) {
+        for (UseCase uc : model.allUseCases()) {
             UseCaseReport r = byId.get(uc.id);
             uc.violation = (r != null) ? buildViolationSummary(r) : null;
         }
@@ -251,11 +268,48 @@ public final class CosmicCalculator {
 
     public static final class CosmicReport {
         public final String projectName;
-        public final List<UseCaseReport> useCases = new ArrayList<>();
+        /** v5.0 - Totali raggruppati per area funzionale (solo aree con almeno uno use case nello scope). */
+        public final List<AreaReport> areas = new ArrayList<>();
+        /** Totale di progetto = somma dei totali di area. */
         public int totalCfp;
 
         public CosmicReport(String projectName) {
             this.projectName = projectName;
+        }
+
+        /** Tutti i report degli use case, area per area (vista derivata: non e' una lista memorizzata). */
+        public List<UseCaseReport> allUseCases() {
+            List<UseCaseReport> out = new ArrayList<>();
+            for (AreaReport a : areas) {
+                out.addAll(a.useCases);
+            }
+            return out;
+        }
+
+        public UseCaseReport findUseCase(String ucId) {
+            if (ucId == null) {
+                return null;
+            }
+            for (AreaReport a : areas) {
+                for (UseCaseReport r : a.useCases) {
+                    if (ucId.equals(r.id)) {
+                        return r;
+                    }
+                }
+            }
+            return null;
+        }
+
+        public AreaReport findArea(String areaId) {
+            if (areaId == null) {
+                return null;
+            }
+            for (AreaReport a : areas) {
+                if (areaId.equals(a.id)) {
+                    return a;
+                }
+            }
+            return null;
         }
 
         /** Report leggibile, pensato per essere stampato nella JTextArea di log. */
@@ -265,61 +319,97 @@ public final class CosmicCalculator {
             sb.append("Progetto: ").append(projectName).append("\n");
             sb.append("TOTALE: ").append(totalCfp).append(" CFP\n\n");
 
-            for (UseCaseReport uc : useCases) {
-                sb.append("- Use Case [").append(uc.id).append("] ").append(uc.name)
-                  .append(" -> ").append(uc.totalCfp).append(" CFP\n");
-                for (FunctionalProcessReport fp : uc.functionalProcesses) {
-                    sb.append("    * FP [").append(fp.fpId).append("] ").append(fp.fpName)
-                      .append(": E=").append(fp.entryCount)
-                      .append(" X=").append(fp.exitCount)
-                      .append(" R=").append(fp.readCount)
-                      .append(" W=").append(fp.writeCount)
-                      .append(" -> ").append(fp.totalCfp).append(" CFP\n");
-                    if (fp.warning != null) {
-                        sb.append("      [WARNING] ").append(fp.warning).append("\n");
+            for (AreaReport area : areas) {
+                sb.append("## Area funzionale [").append(area.label).append("]");
+                if (area.subsystem != null) {
+                    sb.append(" (").append(area.subsystem).append(")");
+                }
+                sb.append(" -> ").append(area.totalCfp).append(" CFP, ").append(area.useCases.size()).append(" use case\n");
+                for (UseCaseReport uc : area.useCases) {
+                    sb.append("- Use Case [").append(uc.id).append("] ").append(uc.name)
+                      .append(" -> ").append(uc.totalCfp).append(" CFP\n");
+                    for (FunctionalProcessReport fp : uc.functionalProcesses) {
+                        sb.append("    * FP [").append(fp.fpId).append("] ").append(fp.fpName)
+                          .append(": E=").append(fp.entryCount)
+                          .append(" X=").append(fp.exitCount)
+                          .append(" R=").append(fp.readCount)
+                          .append(" W=").append(fp.writeCount)
+                          .append(" -> ").append(fp.totalCfp).append(" CFP\n");
+                        if (fp.warning != null) {
+                            sb.append("      [WARNING] ").append(fp.warning).append("\n");
+                        }
+                        if (!fp.unknownMovementTypes.isEmpty()) {
+                            sb.append("      [WARNING] Data movement type non riconosciuti: ")
+                              .append(fp.unknownMovementTypes).append("\n");
+                        }
                     }
-                    if (!fp.unknownMovementTypes.isEmpty()) {
-                        sb.append("      [WARNING] Data movement type non riconosciuti: ")
-                          .append(fp.unknownMovementTypes).append("\n");
+                    if (uc.functionalProcesses.isEmpty()) {
+                        sb.append("    (nessun Functional Process ancora mappato per questo Use Case)\n");
                     }
                 }
-                if (uc.functionalProcesses.isEmpty()) {
-                    sb.append("    (nessun Functional Process ancora mappato per questo Use Case)\n");
-                }
+                sb.append("\n");
             }
             return sb.toString();
         }
 
-        /** Vista "a mappa" per chi preferisce lavorare con dati strutturati invece di testo. */
+        /** Vista "a mappa" per chi preferisce lavorare con dati strutturati invece di testo (stessa gerarchia del modello). */
         public Map<String, Object> toMap() {
             Map<String, Object> root = new LinkedHashMap<>();
             root.put("projectName", projectName);
             root.put("totalCfp", totalCfp);
-            List<Object> ucList = new ArrayList<>();
-            for (UseCaseReport uc : useCases) {
-                Map<String, Object> ucMap = new LinkedHashMap<>();
-                ucMap.put("id", uc.id);
-                ucMap.put("name", uc.name);
-                ucMap.put("totalCfp", uc.totalCfp);
-                List<Object> fpList = new ArrayList<>();
-                for (FunctionalProcessReport fp : uc.functionalProcesses) {
-                    Map<String, Object> fpMap = new LinkedHashMap<>();
-                    fpMap.put("fpId", fp.fpId);
-                    fpMap.put("fpName", fp.fpName);
-                    fpMap.put("triggeringEvent", fp.triggeringEvent);
-                    fpMap.put("entry", fp.entryCount);
-                    fpMap.put("exit", fp.exitCount);
-                    fpMap.put("read", fp.readCount);
-                    fpMap.put("write", fp.writeCount);
-                    fpMap.put("totalCfp", fp.totalCfp);
-                    fpMap.put("warning", fp.warning);
-                    fpList.add(fpMap);
+            List<Object> areaList = new ArrayList<>();
+            for (AreaReport area : areas) {
+                Map<String, Object> areaMap = new LinkedHashMap<>();
+                areaMap.put("id", area.id);
+                areaMap.put("name", area.name);
+                areaMap.put("subsystem", area.subsystem);
+                areaMap.put("totalCfp", area.totalCfp);
+                List<Object> ucList = new ArrayList<>();
+                for (UseCaseReport uc : area.useCases) {
+                    Map<String, Object> ucMap = new LinkedHashMap<>();
+                    ucMap.put("id", uc.id);
+                    ucMap.put("name", uc.name);
+                    ucMap.put("totalCfp", uc.totalCfp);
+                    List<Object> fpList = new ArrayList<>();
+                    for (FunctionalProcessReport fp : uc.functionalProcesses) {
+                        Map<String, Object> fpMap = new LinkedHashMap<>();
+                        fpMap.put("fpId", fp.fpId);
+                        fpMap.put("fpName", fp.fpName);
+                        fpMap.put("triggeringEvent", fp.triggeringEvent);
+                        fpMap.put("entry", fp.entryCount);
+                        fpMap.put("exit", fp.exitCount);
+                        fpMap.put("read", fp.readCount);
+                        fpMap.put("write", fp.writeCount);
+                        fpMap.put("totalCfp", fp.totalCfp);
+                        fpMap.put("warning", fp.warning);
+                        fpList.add(fpMap);
+                    }
+                    ucMap.put("functionalProcesses", fpList);
+                    ucList.add(ucMap);
                 }
-                ucMap.put("functionalProcesses", fpList);
-                ucList.add(ucMap);
+                areaMap.put("useCases", ucList);
+                areaList.add(areaMap);
             }
-            root.put("useCases", ucList);
+            root.put("functionalAreas", areaList);
             return root;
+        }
+    }
+
+    /** v5.0 - Totale CFP di UNA area funzionale e dei suoi use case. */
+    public static final class AreaReport {
+        public final String id;
+        public final String name;
+        public final String subsystem;
+        /** Etichetta pronta per UI/CSV: "F-PRE-04: Commissioned rooms management". */
+        public final String label;
+        public final List<UseCaseReport> useCases = new ArrayList<>();
+        public int totalCfp;
+
+        public AreaReport(String id, String name, String subsystem, String label) {
+            this.id = id;
+            this.name = name;
+            this.subsystem = subsystem;
+            this.label = label;
         }
     }
 

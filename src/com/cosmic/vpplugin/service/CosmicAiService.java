@@ -1,6 +1,7 @@
 package com.cosmic.vpplugin.service;
 
 import com.cosmic.vpplugin.calculator.CosmicCalculator;
+import com.cosmic.vpplugin.calculator.CosmicCalculator.AreaReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.CosmicReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.FunctionalProcessReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.UseCaseReport;
@@ -14,6 +15,7 @@ import com.cosmic.vpplugin.json.MiniJsonParser;
 import com.cosmic.vpplugin.listener.CosmicModelChangeListener;
 import com.cosmic.vpplugin.model.CosmicJsonModel;
 import com.cosmic.vpplugin.model.CosmicJsonModel.Actor;
+import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalArea;
 import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.SubProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
@@ -546,11 +548,7 @@ public final class CosmicAiService {
         modelProject = ApplicationManager.instance().getProjectManager().getProject();
         lastChunks = new ArrayList<>(chunks);
         knownUseCaseIds = new HashSet<>();
-        Set<String> subsystems = new HashSet<>();
-        for (UseCaseChunk c : chunks) {
-            knownUseCaseIds.add(c.id);
-            subsystems.add(c.subsystem == null ? "" : c.subsystem);
-        }
+        for (UseCaseChunk c : chunks) knownUseCaseIds.add(c.id);
         lastReport = new CosmicCalculator().compute(model);
         manualUseCaseCounter = 0;
         synchronized (chatHistory) { chatHistory.clear(); }
@@ -559,7 +557,7 @@ public final class CosmicAiService {
         try {
             activeGenerator = new UseCaseDiagramGenerator();
             activeGenerator.setLogSink(ui::onLog);
-            activeGenerator.begin(projectName, subsystems.size() > 1);
+            activeGenerator.begin(projectName);
         } finally {
             suppressSync.decrementAndGet();
         }
@@ -573,11 +571,13 @@ public final class CosmicAiService {
         if (model == null) return;
         suppressSync.incrementAndGet();
         try {
-            UseCase uc = buildUseCase(chunk, measured, model);
+            // v5.0: l'area funzionale viene dalla gerarchia del documento (Chunker), mai dall'LLM
+            FunctionalArea area = model.findOrCreateArea(chunk.functionalAreaRef, chunk.functionalAreaName, chunk.subsystem);
+            UseCase uc = buildUseCase(chunk, measured, area);
             // impronta di cio' che "Rimisura da VP" rileggera' dal campo Specification (vedi UseCaseDescription)
             uc.specFingerprint = UseCaseDescription.fingerprint(uc.name,
                     UseCaseDescription.specificationOf(UseCaseDescription.build(uc), uc.id));
-            model.useCases.add(uc);
+            area.addUseCase(uc);
 
             CosmicCalculator calculator = new CosmicCalculator();
             lastReport = calculator.compute(model);
@@ -601,7 +601,7 @@ public final class CosmicAiService {
         }
     }
 
-    private UseCase buildUseCase(UseCaseChunk chunk, Measured measured, CosmicJsonModel model) {
+    private UseCase buildUseCase(UseCaseChunk chunk, Measured measured, FunctionalArea area) {
         UseCase uc = new UseCase();
         uc.id = chunk.id;                       // identita' ORIGINALE dal documento, mai dall'LLM
         uc.name = chunk.name;
@@ -634,7 +634,7 @@ public final class CosmicAiService {
             if (fu != null) actorNames.add(fu);
         }
         for (String name : actorNames) {
-            Actor actor = findOrCreateActorByName(model, name);
+            Actor actor = findOrCreateActorByName(currentModel, area, name);   // attore PROPRIO dell'area
             if (uc.primaryActorId == null) uc.primaryActorId = actor.id;
             else if (!uc.coActorIds.contains(actor.id)) uc.coActorIds.add(actor.id);
         }
@@ -653,27 +653,23 @@ public final class CosmicAiService {
         return fallback;
     }
 
-    private static Actor findOrCreateActorByName(CosmicJsonModel model, String name) {
-        String key = name.trim().toLowerCase();
-        for (Actor a : model.actors) {
-            if (a.name != null && a.name.trim().toLowerCase().equals(key)) return a;
-        }
-        Set<String> used = new HashSet<>();
-        for (Actor a : model.actors) used.add(a.id);
-        int n = model.actors.size() + 1;
-        while (used.contains("A" + n)) n++;
+    /**
+     * v5.0 - Gli attori sono per AREA: lo stesso nome in due aree funzionali da' due {@link Actor} distinti (ognuno
+     * nel package della propria area su VP), con id univoco nel progetto.
+     */
+    private static Actor findOrCreateActorByName(CosmicJsonModel model, FunctionalArea area, String name) {
+        Actor existing = area.findActorByName(name);
+        if (existing != null) return existing;
         Actor actor = new Actor();
-        actor.id = "A" + n;
+        actor.id = model.nextActorId();
         actor.name = name.trim();
         actor.description = "";
-        model.actors.add(actor);
+        area.addActor(actor);
         return actor;
     }
 
     private static UseCaseReport findUseCaseReport(CosmicReport report, String ucId) {
-        if (report == null) return null;
-        for (UseCaseReport r : report.useCases) if (r.id != null && r.id.equals(ucId)) return r;
-        return null;
+        return report == null ? null : report.findUseCase(ucId);
     }
 
     private void finishSession(CosmicAnalysisListener ui, int processed, int total, int failures,
@@ -692,7 +688,7 @@ public final class CosmicAiService {
                 calculator.applyViolationFlags(model, lastReport);
             }
             int violations = 0;
-            if (model != null) for (UseCase uc : model.useCases) if (uc.violation != null) violations++;
+            if (model != null) for (UseCase uc : model.allUseCases()) if (uc.violation != null) violations++;
             StringBuilder sum = new StringBuilder();
             sum.append(aborted ? "Analisi INTERROTTA (" + abortReason + "): " : "Analisi completata: ")
                .append(processed).append("/").append(total).append(" use case");
@@ -723,26 +719,31 @@ public final class CosmicAiService {
 
     /**
      * Esporta il report finale. Il file scelto ha lo stesso formato di prima (Use Case ID; Use Case Name; FP ID; FP Name;
-     * Entry; Exit; Read; Write; Total CFP; Warning) con in coda Triggering Event, Functional User e Subsystem.
+     * Entry; Exit; Read; Write; Total CFP; Warning) con in coda Triggering Event, Functional User, Subsystem e (v5.0) Functional Area.
      * Accanto viene scritto {@code <nome>_dettaglio.csv}: la tabella "Measurement" del professore (FU, Sub-process, DG,
-     * OOI, DM, CFP per ogni frase) per confrontare con la Ground Truth anche a livello di data movement.
+     * OOI, DM, CFP per ogni frase) per confrontare con la Ground Truth anche a livello di data movement, e
+     * {@code <nome>_aree.csv} (v5.0): totali CFP e numero di use case per area funzionale.
      */
     public void exportToCsv(File file, CosmicAnalysisListener listener) {
         ensureExecutors();
         runOnEdt(() -> {
-            if (lastReport == null || currentModel == null || currentModel.useCases.isEmpty()) {
+            if (lastReport == null || currentModel == null || !currentModel.hasUseCases()) {
                 listener.onAnalysisFailed(new IllegalStateException("Nessuna analisi da esportare."));
                 return;
             }
             final String summary = buildSummaryCsv(currentModel, lastReport);
             final String detail = buildDetailCsv(currentModel);
+            final String areas = buildAreaCsv(lastReport);
+            final String baseName = file.getName().replaceFirst("(?i)\\.csv$", "");
+            final File areaFile = new File(file.getParentFile(), baseName + "_aree.csv");
             final File detailFile = new File(file.getParentFile(), file.getName().replaceFirst("(?i)\\.csv$", "") + "_dettaglio.csv");
             auxExecutor.submit(() -> {
                 try {
                     Files.write(file.toPath(), ("﻿" + summary).getBytes(StandardCharsets.UTF_8));
                     Files.write(detailFile.toPath(), ("﻿" + detail).getBytes(StandardCharsets.UTF_8));
+                    Files.write(areaFile.toPath(), ("﻿" + areas).getBytes(StandardCharsets.UTF_8));
                     SwingUtilities.invokeLater(() -> listener.onLog("Report esportato in: " + file.getAbsolutePath()
-                            + "  (dettaglio per frase: " + detailFile.getName() + ")"));
+                            + "  (dettaglio per frase: " + detailFile.getName() + "; totali per area: " + areaFile.getName() + ")"));
                 } catch (IOException e) {
                     SwingUtilities.invokeLater(() -> listener.onAnalysisFailed(e));
                 }
@@ -752,27 +753,43 @@ public final class CosmicAiService {
 
     private static String buildSummaryCsv(CosmicJsonModel model, CosmicReport report) {
         Map<String, UseCase> byId = new LinkedHashMap<>();
-        for (UseCase uc : model.useCases) byId.put(uc.id, uc);
+        for (UseCase uc : model.allUseCases()) byId.put(uc.id, uc);
         StringBuilder sb = new StringBuilder();
-        sb.append("Use Case ID;Use Case Name;FP ID;FP Name;Entry;Exit;Read;Write;Total CFP;Warning;Triggering Event;Functional User;Subsystem\n");
-        for (UseCaseReport uc : report.useCases) {
-            UseCase dto = byId.get(uc.id);
-            String subsystem = dto == null || dto.subsystem == null ? "" : dto.subsystem;
-            if (uc.functionalProcesses.isEmpty()) {
-                row(sb, uc.id, uc.name, "", "", "0", "0", "0", "0", "0", "Nessun Functional Process misurato", "", "", subsystem);
-                continue;
-            }
-            for (int i = 0; i < uc.functionalProcesses.size(); i++) {
-                FunctionalProcessReport fp = uc.functionalProcesses.get(i);
-                FunctionalProcess fpDto = (dto != null && i < dto.functionalProcesses.size()) ? dto.functionalProcesses.get(i) : null;
-                String fu = fpDto == null ? "" : String.valueOf(firstEntryUser(fpDto) == null ? "" : firstEntryUser(fpDto));
-                row(sb, uc.id, uc.name, fp.fpId, fp.fpName,
-                        String.valueOf(fp.entryCount), String.valueOf(fp.exitCount), String.valueOf(fp.readCount),
-                        String.valueOf(fp.writeCount), String.valueOf(fp.totalCfp),
-                        fp.warning == null ? "" : fp.warning,
-                        fp.triggeringEvent == null ? "" : fp.triggeringEvent, fu, subsystem);
+        sb.append("Use Case ID;Use Case Name;FP ID;FP Name;Entry;Exit;Read;Write;Total CFP;Warning;Triggering Event;Functional User;Subsystem;Functional Area\n");
+        for (AreaReport area : report.areas) {
+            for (UseCaseReport uc : area.useCases) {
+                UseCase dto = byId.get(uc.id);
+                String subsystem = dto == null || dto.subsystem == null ? "" : dto.subsystem;
+                if (uc.functionalProcesses.isEmpty()) {
+                    row(sb, uc.id, uc.name, "", "", "0", "0", "0", "0", "0", "Nessun Functional Process misurato", "", "", subsystem, area.label);
+                    continue;
+                }
+                for (int i = 0; i < uc.functionalProcesses.size(); i++) {
+                    FunctionalProcessReport fp = uc.functionalProcesses.get(i);
+                    FunctionalProcess fpDto = (dto != null && i < dto.functionalProcesses.size()) ? dto.functionalProcesses.get(i) : null;
+                    String fu = fpDto == null ? "" : String.valueOf(firstEntryUser(fpDto) == null ? "" : firstEntryUser(fpDto));
+                    row(sb, uc.id, uc.name, fp.fpId, fp.fpName,
+                            String.valueOf(fp.entryCount), String.valueOf(fp.exitCount), String.valueOf(fp.readCount),
+                            String.valueOf(fp.writeCount), String.valueOf(fp.totalCfp),
+                            fp.warning == null ? "" : fp.warning,
+                            fp.triggeringEvent == null ? "" : fp.triggeringEvent, fu, subsystem, area.label);
+                }
             }
         }
+        return sb.toString();
+    }
+
+    /** v5.0 - Totali CFP per area funzionale (+ riga TOTALE di progetto, somma dei totali di area). */
+    private static String buildAreaCsv(CosmicReport report) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Area ID;Area Name;Subsystem;Use Cases;Total CFP\n");
+        for (AreaReport a : report.areas) {
+            row(sb, a.id, a.name == null ? "" : a.name, a.subsystem == null ? "" : a.subsystem,
+                    String.valueOf(a.useCases.size()), String.valueOf(a.totalCfp));
+        }
+        int ucs = 0;
+        for (AreaReport a : report.areas) ucs += a.useCases.size();
+        row(sb, "TOTALE", "", "", String.valueOf(ucs), String.valueOf(report.totalCfp));
         return sb.toString();
     }
 
@@ -780,7 +797,7 @@ public final class CosmicAiService {
         CosmicCalculator calculator = new CosmicCalculator();
         StringBuilder sb = new StringBuilder();
         sb.append("Use Case ID;Use Case Name;FP ID;Step;Sub-process;FU;DG;OOI;DM;CFP\n");
-        for (UseCase uc : model.useCases) {
+        for (UseCase uc : model.allUseCases()) {
             for (FunctionalProcess fp : uc.functionalProcesses) {
                 int[] cfp = calculator.cfpPerSubProcess(fp);
                 for (int i = 0; i < fp.subProcesses.size(); i++) {
@@ -894,7 +911,7 @@ public final class CosmicAiService {
 
     private String buildValidationReport(CosmicJsonModel model, List<UseCaseChunk> chunks) {
         Map<String, UseCase> modelById = new LinkedHashMap<>();
-        for (UseCase uc : model.useCases) modelById.put(uc.id, uc);
+        for (UseCase uc : model.allUseCases()) modelById.put(uc.id, uc);
         Set<String> chunkIds = new LinkedHashSet<>();
         for (UseCaseChunk c : chunks) chunkIds.add(c.id);
 
@@ -915,7 +932,7 @@ public final class CosmicAiService {
             }
 
             Set<String> present = new HashSet<>();
-            for (Actor a : model.actors) {
+            for (Actor a : model.allActors()) {
                 if (a.id != null && (a.id.equals(uc.primaryActorId) || uc.coActorIds.contains(a.id))) present.add(safe(a.name).toLowerCase());
             }
             for (String expected : c.primaryActors) {
@@ -926,7 +943,7 @@ public final class CosmicAiService {
             }
             if (uc.violation != null) violations.add("[" + c.id + "] " + uc.violation);
         }
-        for (UseCase uc : model.useCases) {
+        for (UseCase uc : model.allUseCases()) {
             if (!chunkIds.contains(uc.id)) {
                 extra.add("[" + uc.id + "] " + uc.name + (uc.id.startsWith("UC-USER-") ? " (aggiunto a mano su VP)" : ""));
             }
@@ -934,7 +951,7 @@ public final class CosmicAiService {
 
         StringBuilder sb = new StringBuilder();
         sb.append("=== VALIDAZIONE MODELLO vs REQUISITI ===\n");
-        sb.append("Use case nei requisiti: ").append(chunks.size()).append(" | nel modello: ").append(model.useCases.size());
+        sb.append("Use case nei requisiti: ").append(chunks.size()).append(" | nel modello: ").append(model.useCaseCount());
         if (lastReport != null) sb.append(" | CFP totali: ").append(lastReport.totalCfp);
         sb.append("\n");
         int issues = section(sb, "Use case dei requisiti MANCANTI nel modello", missing)
@@ -995,13 +1012,13 @@ public final class CosmicAiService {
     private String buildModelContext(String userMessage) {
         CosmicJsonModel m = currentModel;
         CosmicReport r = lastReport;
-        if (m == null || r == null || m.useCases.isEmpty()) return "Nessuna analisi eseguita: il modello e' vuoto.";
+        if (m == null || r == null || !m.hasUseCases()) return "Nessuna analisi eseguita: il modello e' vuoto.";
         StringBuilder sb = new StringBuilder();
-        sb.append("Progetto: ").append(m.projectName).append(" | use case: ").append(m.useCases.size())
+        sb.append("Progetto: ").append(m.projectName).append(" | use case: ").append(m.useCaseCount())
           .append(" | CFP totali: ").append(r.totalCfp).append("\n");
         Map<String, UseCaseReport> byId = new LinkedHashMap<>();
-        for (UseCaseReport ur : r.useCases) byId.put(ur.id, ur);
-        for (UseCase uc : m.useCases) {
+        for (UseCaseReport ur : r.allUseCases()) byId.put(ur.id, ur);
+        for (UseCase uc : m.allUseCases()) {
             if (sb.length() > 6000) { sb.append("(elenco troncato)\n"); break; }
             UseCaseReport ur = byId.get(uc.id);
             sb.append("- [").append(uc.id).append("] ").append(uc.name).append(" | ")
@@ -1012,7 +1029,7 @@ public final class CosmicAiService {
         }
         String lower = userMessage.toLowerCase();
         int shown = 0;
-        for (UseCase uc : m.useCases) {
+        for (UseCase uc : m.allUseCases()) {
             boolean mentioned = lower.contains(uc.id.toLowerCase()) || (uc.name.length() > 4 && lower.contains(uc.name.toLowerCase()));
             if (!mentioned) continue;
             sb.append("\nDettaglio [").append(uc.id).append("] ").append(uc.name).append(":\n");
@@ -1127,22 +1144,35 @@ public final class CosmicAiService {
         dto.id = nextManualUseCaseId(currentModel);
         dto.name = safeTrim(vpUseCase.getName()).isEmpty() ? dto.id : safeTrim(vpUseCase.getName());
         dto.vpElementId = vpUseCase.getId();
+        String activeId = null;
         try {
             IDiagramUIModel active = ApplicationManager.instance().getDiagramManager().getActiveDiagram();
-            dto.diagramId = active == null ? null : active.getId();
+            activeId = active == null ? null : active.getId();
         } catch (Exception ignored) { }
-        currentModel.useCases.add(dto);
+        dto.diagramId = activeId;
+        String parentId = null;
+        try {
+            IModelElement parent = vpUseCase.getParent();
+            parentId = parent == null ? null : parent.getId();
+        } catch (Exception ignored) { }
+        areaForNewUseCase(currentModel, parentId, activeId).addUseCase(dto);
         return dto;
+    }
+
+    /**
+     * v5.0 - In quale area finisce uno use case apparso su VP senza passare dal generatore: quella il cui PACKAGE lo
+     * contiene; altrimenti quella del DIAGRAMMA attivo; altrimenti l'area di default.
+     */
+    private static FunctionalArea areaForNewUseCase(CosmicJsonModel model, String parentVpId, String activeDiagramId) {
+        FunctionalArea a = model.findAreaByPackageId(parentVpId);
+        if (a == null) a = model.findAreaByDiagramId(activeDiagramId);
+        return a != null ? a : model.defaultArea();
     }
 
     private boolean removeUseCaseIfPresent(IUseCase vpUseCase) {
         UseCase dto = findUseCaseByVpElementId(vpUseCase);
         if (dto == null) return false;
-        currentModel.useCases.remove(dto);
-        for (UseCase other : currentModel.useCases) {
-            other.includesIds.remove(dto.id);
-            other.extendsList.removeIf(e -> dto.id.equals(e.targetId));
-        }
+        currentModel.removeUseCase(dto);      // toglie dall'area e ripulisce include/extend di ogni altra area
         return true;
     }
 
@@ -1157,7 +1187,7 @@ public final class CosmicAiService {
         if (vpActor == null) return false;
         UseCase dto = findUseCaseByVpElementId(vpUseCase);
         if (dto == null) return false;
-        Actor actor = findOrCreateActor(vpActor);
+        Actor actor = findOrCreateActor(vpActor, currentModel.areaOf(dto));
         if (added) {
             if (actor.id.equals(dto.primaryActorId) || dto.coActorIds.contains(actor.id)) return false;
             if (dto.primaryActorId == null) dto.primaryActorId = actor.id; else dto.coActorIds.add(actor.id);
@@ -1173,7 +1203,7 @@ public final class CosmicAiService {
     private UseCase findUseCaseByVpElementId(IUseCase vpUseCase) {
         if (currentModel == null || vpUseCase == null) return null;
         String id = vpUseCase.getId();
-        for (UseCase uc : currentModel.useCases) if (id != null && id.equals(uc.vpElementId)) return uc;
+        for (UseCase uc : currentModel.allUseCases()) if (id != null && id.equals(uc.vpElementId)) return uc;
         return null;
     }
 
@@ -1183,14 +1213,15 @@ public final class CosmicAiService {
 
     private Actor findActorByVpElementId(String vpId) {
         if (currentModel == null || vpId == null) return null;
-        for (Actor a : currentModel.actors) if (vpId.equals(a.vpElementId)) return a;
+        for (Actor a : currentModel.allActors()) if (vpId.equals(a.vpElementId)) return a;
         return null;
     }
 
-    private Actor findOrCreateActor(IActor vpActor) {
+    /** L'attore VP e' gia' tracciato (in qualsiasi area)? Altrimenti se ne crea uno nell'area dello use case. */
+    private Actor findOrCreateActor(IActor vpActor, FunctionalArea area) {
         Actor byId = findActorByVpElementId(vpActor.getId());
         if (byId != null) return byId;
-        Actor actor = findOrCreateActorByName(currentModel, safeTrim(vpActor.getName()).isEmpty() ? "Actor" : vpActor.getName());
+        Actor actor = findOrCreateActorByName(currentModel, area, safeTrim(vpActor.getName()).isEmpty() ? "Actor" : vpActor.getName());
         if (actor.vpElementId == null) actor.vpElementId = vpActor.getId();
         return actor;
     }
@@ -1237,7 +1268,7 @@ public final class CosmicAiService {
         String id = active == null ? null : active.getId();
         String name = active == null ? null : active.getName();
         Set<String> ids = new HashSet<>();
-        if (id != null) for (UseCase uc : model.useCases) if (id.equals(uc.diagramId)) ids.add(uc.id);
+        if (id != null) for (UseCase uc : model.allUseCases()) if (id.equals(uc.diagramId)) ids.add(uc.id);
         CosmicReport scoped = new CosmicCalculator().computeScoped(model, ids);
         lastActiveDiagramId = id;
         ui.onScopeChanged(name, scoped, total);
@@ -1378,7 +1409,7 @@ public final class CosmicAiService {
         lastChunks = restoredChunks;
         activeGenerator = null;
         knownUseCaseIds = new HashSet<>();
-        for (UseCase uc : model.useCases) knownUseCaseIds.add(uc.id);
+        for (UseCase uc : model.allUseCases()) knownUseCaseIds.add(uc.id);
         manualUseCaseCounter = 0;
         CosmicCalculator calculator = new CosmicCalculator();
         lastReport = calculator.compute(model);
@@ -1387,10 +1418,14 @@ public final class CosmicAiService {
         if (changed) markDirty();
 
         if (ui != null) {
-            ui.onLog("Modello COSMIC ripristinato dal progetto: " + model.useCases.size() + " use case, "
+            ui.onLog("Modello COSMIC ripristinato dal progetto: " + model.useCaseCount() + " use case, "
                     + lastReport.totalCfp + " CFP totali, "
                     + (restoredChunks.isEmpty() ? "nessun requisito originale salvato (validazione: ricollega il documento)."
                                                 : restoredChunks.size() + " requisiti originali per la validazione."));
+            if (model.migratedFromFlatSchema) {
+                ui.onLog("  NOTA: salvataggio di una versione precedente (use case senza aree funzionali): gli use case sono stati "
+                        + "raggruppati per sottosistema. Riesegui l'analisi dal documento per ottenere le aree funzionali vere.");
+            }
             for (String n : notes) ui.onLog("  riconciliazione: " + n);
             ui.onAnalysisCompleted(model, lastReport);
         }
@@ -1434,7 +1469,7 @@ public final class CosmicAiService {
         // 1) use case cancellati su VP
         List<UseCase> gone = new ArrayList<>();
         int tracked = 0;
-        for (UseCase uc : model.useCases) {
+        for (UseCase uc : model.allUseCases()) {
             if (uc.vpElementId == null) continue;
             tracked++;
             if (vpById.containsKey(uc.vpElementId)) continue;
@@ -1447,11 +1482,7 @@ public final class CosmicAiService {
             return false;
         }
         for (UseCase uc : gone) {
-            model.useCases.remove(uc);
-            for (UseCase other : model.useCases) {
-                other.includesIds.remove(uc.id);
-                other.extendsList.removeIf(e -> uc.id.equals(e.targetId));
-            }
+            model.removeUseCase(uc);                 // dall'area + include/extend di ogni altra area
             changed = true;
         }
         if (!gone.isEmpty()) {
@@ -1462,7 +1493,7 @@ public final class CosmicAiService {
 
         // 2) rinomine e use case nuovi
         Map<String, UseCase> byVp = new LinkedHashMap<>();
-        for (UseCase uc : model.useCases) if (uc.vpElementId != null) byVp.put(uc.vpElementId, uc);
+        for (UseCase uc : model.allUseCases()) if (uc.vpElementId != null) byVp.put(uc.vpElementId, uc);
         int added = 0;
         for (VpProjectReader.UseCaseSnap u : snap.useCases) {
             UseCase uc = byVp.get(u.vpId);
@@ -1471,7 +1502,7 @@ public final class CosmicAiService {
                 uc.id = nextManualUseCaseId(model);
                 uc.vpElementId = u.vpId;
                 uc.name = u.name.isEmpty() ? uc.id : u.name;
-                model.useCases.add(uc);
+                areaForNewUseCase(model, u.parentVpId, null).addUseCase(uc);
                 byVp.put(u.vpId, uc);
                 added++;
                 changed = true;
@@ -1487,14 +1518,14 @@ public final class CosmicAiService {
 
         // 4) attori eliminati da VP e non piu' referenziati
         Set<String> referenced = new HashSet<>();
-        for (UseCase uc : model.useCases) {
+        for (UseCase uc : model.allUseCases()) {
             if (uc.primaryActorId != null) referenced.add(uc.primaryActorId);
             referenced.addAll(uc.coActorIds);
         }
         Set<String> vpActorIds = new HashSet<>();
         for (VpProjectReader.ActorSnap a : snap.actors) vpActorIds.add(a.vpId);
         if (!vpActorIds.isEmpty()) {
-            changed |= model.actors.removeIf(a -> a.vpElementId != null && !vpActorIds.contains(a.vpElementId) && !referenced.contains(a.id));
+            changed |= model.removeActorsIf(a -> a.vpElementId != null && !vpActorIds.contains(a.vpElementId) && !referenced.contains(a.id));
         }
         return changed;
     }
@@ -1505,12 +1536,12 @@ public final class CosmicAiService {
         // <<include>>: from = use case base, to = use case incluso
         boolean modelHasIncludes = false;
         boolean modelHasExtends = false;
-        for (UseCase uc : model.useCases) {
+        for (UseCase uc : model.allUseCases()) {
             if (!uc.includesIds.isEmpty()) modelHasIncludes = true;
             if (!uc.extendsList.isEmpty()) modelHasExtends = true;
         }
         if (!snap.includes.isEmpty() || !modelHasIncludes) {
-            for (UseCase uc : model.useCases) {
+            for (UseCase uc : model.allUseCases()) {
                 if (uc.vpElementId == null) continue;
                 List<String> fresh = new ArrayList<>();
                 for (VpProjectReader.LinkSnap l : snap.includes) {
@@ -1525,7 +1556,7 @@ public final class CosmicAiService {
 
         // <<extend>>: from = use case estensione, to = use case base
         if (!snap.extendsLinks.isEmpty() || !modelHasExtends) {
-            for (UseCase uc : model.useCases) {
+            for (UseCase uc : model.allUseCases()) {
                 if (uc.vpElementId == null) continue;
                 List<CosmicJsonModel.ExtendRelation> fresh = new ArrayList<>();
                 for (VpProjectReader.LinkSnap l : snap.extendsLinks) {
@@ -1551,14 +1582,14 @@ public final class CosmicAiService {
 
         // associazioni attore - use case
         boolean modelHasActors = false;
-        for (UseCase uc : model.useCases) if (uc.primaryActorId != null) modelHasActors = true;
+        for (UseCase uc : model.allUseCases()) if (uc.primaryActorId != null) modelHasActors = true;
         if (!snap.associations.isEmpty() || !modelHasActors) {
-            for (UseCase uc : model.useCases) {
+            for (UseCase uc : model.allUseCases()) {
                 if (uc.vpElementId == null) continue;
                 List<String> actorIds = new ArrayList<>();
                 for (VpProjectReader.LinkSnap l : snap.associations) {
                     if (!uc.vpElementId.equals(l.toVpId)) continue;
-                    Actor a = resolveActor(model, snap, l.fromVpId);
+                    Actor a = resolveActor(model, snap, model.areaOf(uc), l.fromVpId);
                     if (a != null && !actorIds.contains(a.id)) actorIds.add(a.id);
                 }
                 String primary = actorIds.contains(uc.primaryActorId) ? uc.primaryActorId : (actorIds.isEmpty() ? null : actorIds.get(0));
@@ -1578,11 +1609,11 @@ public final class CosmicAiService {
         return changed;
     }
 
-    private static Actor resolveActor(CosmicJsonModel model, VpProjectReader.Snapshot snap, String actorVpId) {
-        for (Actor a : model.actors) if (actorVpId.equals(a.vpElementId)) return a;
+    private static Actor resolveActor(CosmicJsonModel model, VpProjectReader.Snapshot snap, FunctionalArea area, String actorVpId) {
+        for (Actor a : model.allActors()) if (actorVpId.equals(a.vpElementId)) return a;
         for (VpProjectReader.ActorSnap s : snap.actors) {
             if (!s.vpId.equals(actorVpId)) continue;
-            Actor a = findOrCreateActorByName(model, s.name.isEmpty() ? "Actor" : s.name);
+            Actor a = findOrCreateActorByName(model, area, s.name.isEmpty() ? "Actor" : s.name);
             if (a.vpElementId == null) a.vpElementId = actorVpId;
             return a;
         }
@@ -1591,7 +1622,7 @@ public final class CosmicAiService {
 
     private String nextManualUseCaseId(CosmicJsonModel model) {
         Set<String> ids = new HashSet<>();
-        for (UseCase uc : model.useCases) ids.add(uc.id);
+        for (UseCase uc : model.allUseCases()) ids.add(uc.id);
         int n = manualUseCaseCounter;
         String id;
         do { id = "UC-USER-" + (++n); } while (ids.contains(id));
@@ -1610,7 +1641,7 @@ public final class CosmicAiService {
 
     private static int countUnmeasuredSentences(CosmicJsonModel model) {
         int n = 0;
-        for (UseCase uc : model.useCases)
+        for (UseCase uc : model.allUseCases())
             for (FunctionalProcess fp : uc.functionalProcesses)
                 for (SubProcess sp : fp.subProcesses) if (sp.unmeasured) n++;
         return n;
@@ -1640,7 +1671,7 @@ public final class CosmicAiService {
         CosmicJsonModel model = currentModel;
         if (model == null || analysisRunning.get()) return false;
         UseCase uc = null;
-        for (UseCase u : model.useCases) if (u.id != null && u.id.equals(ucId)) uc = u;
+        for (UseCase u : model.allUseCases()) if (u.id != null && u.id.equals(ucId)) uc = u;
         if (uc == null) return false;
         SubProcess target = null;
         for (FunctionalProcess fp : uc.functionalProcesses) {
@@ -1813,7 +1844,7 @@ public final class CosmicAiService {
             manualUseCaseCounter = 0;
         }
         Map<String, UseCase> byVp = new LinkedHashMap<>();
-        for (UseCase uc : model.useCases) if (uc.vpElementId != null) byVp.put(uc.vpElementId, uc);
+        for (UseCase uc : model.allUseCases()) if (uc.vpElementId != null) byVp.put(uc.vpElementId, uc);
 
         for (VpProjectReader.UseCaseSnap u : snap.useCases) {
             UseCase uc = byVp.get(u.vpId);
@@ -1822,11 +1853,13 @@ public final class CosmicAiService {
                 uc.id = nextManualUseCaseId(model);
                 uc.vpElementId = u.vpId;
                 uc.name = u.name.isEmpty() ? uc.id : u.name;
+                String activeId = null;
                 try {
                     IDiagramUIModel active = ApplicationManager.instance().getDiagramManager().getActiveDiagram();
-                    uc.diagramId = active == null ? null : active.getId();
+                    activeId = active == null ? null : active.getId();
                 } catch (Exception ignored) { }
-                model.useCases.add(uc);
+                uc.diagramId = activeId;
+                areaForNewUseCase(model, u.parentVpId, activeId).addUseCase(uc);
                 byVp.put(u.vpId, uc);
             } else if (!u.name.isEmpty() && !u.name.equals(uc.name)) {
                 applyRename(uc, u.name);
@@ -1856,7 +1889,7 @@ public final class CosmicAiService {
         CosmicJsonModel model = currentModel;
         if (model == null) return;
         UseCase uc = null;
-        for (UseCase u : model.useCases) if (item.ucId.equals(u.id)) uc = u;
+        for (UseCase u : model.allUseCases()) if (item.ucId.equals(u.id)) uc = u;
         if (uc == null) return;                       // cancellato su VP durante la misura
         suppressSync.incrementAndGet();
         try {
@@ -1880,7 +1913,7 @@ public final class CosmicAiService {
                 uc.specFingerprint = item.fingerprint;
                 if (uc.primaryActorId == null) {
                     String fu = firstEntryUser(uc.functionalProcesses.get(0));
-                    if (fu != null) uc.primaryActorId = findOrCreateActorByName(model, fu).id;
+                    if (fu != null) uc.primaryActorId = findOrCreateActorByName(model, model.areaOf(uc), fu).id;
                 }
             }
 
@@ -1922,7 +1955,7 @@ public final class CosmicAiService {
                 CosmicCalculator calculator = new CosmicCalculator();
                 lastReport = calculator.compute(model);
                 calculator.applyViolationFlags(model, lastReport);
-                for (UseCase uc : model.useCases) {
+                for (UseCase uc : model.allUseCases()) {
                     try {
                         VisualFeedbackApplier.applyToUseCase(uc, findUseCaseReport(lastReport, uc.id));
                     } catch (Exception ignored) { /* use case senza elemento su VP */ }

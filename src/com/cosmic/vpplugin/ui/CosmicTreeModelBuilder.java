@@ -1,9 +1,11 @@
 package com.cosmic.vpplugin.ui;
 
+import com.cosmic.vpplugin.calculator.CosmicCalculator.AreaReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.CosmicReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.FunctionalProcessReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.UseCaseReport;
 import com.cosmic.vpplugin.model.CosmicJsonModel;
+import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalArea;
 import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.SubProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
@@ -20,12 +22,13 @@ import java.util.Map;
  * relazione tra Use Case e Processi Funzionali COSMIC NON e' 1:1:
  *
  *   Progetto
- *    └─ Use Case "Insert a New Customer" (3 CFP)
- *        ├─ FP "Insert new customer - Validation" (1 CFP)
- *        │    └─ 1. Enter customer data [nessun movimento]
- *        └─ FP "Insert new customer - Storage" (2 CFP)
- *             ├─ 1. Validate and store customer [W]
- *             └─ 2. Show confirmation / error message [X]
+ *    └─ Area funzionale "F-GES-03: Customers management" (v5.0: totale CFP dell'area)
+ *        └─ Use Case "Insert a New Customer" (3 CFP)
+ *            ├─ FP "Insert new customer - Validation" (1 CFP)
+ *            │    └─ 1. Enter customer data [nessun movimento]
+ *            └─ FP "Insert new customer - Storage" (2 CFP)
+ *                 ├─ 1. Validate and store customer [W]
+ *                 └─ 2. Show confirmation / error message [X]
  *
  * Un singolo Use Case con PIU' nodi FP figli rende immediatamente evidente
  * la scomposizione 1:N; un FP che elenca PIU' Use Case genitori (raro, ma
@@ -48,15 +51,21 @@ public final class CosmicTreeModelBuilder {
      * {@link #toString()} restituisce l'etichetta, quindi JTree continua a mostrare lo stesso testo di prima.
      */
     public static final class NodeData {
-        public enum Kind { ROOT, USE_CASE, FUNCTIONAL_PROCESS, SUB_PROCESS, INFO }
+        public enum Kind { ROOT, AREA, USE_CASE, FUNCTIONAL_PROCESS, SUB_PROCESS, INFO }
 
         public final Kind kind;
-        public final String ucId;     // null per ROOT
+        public final String areaId;   // v5.0: area funzionale del nodo; null per ROOT
+        public final String ucId;     // null per ROOT e AREA
         public final String fpId;     // non null solo per FP e sotto-processi
         public final String label;
 
         public NodeData(Kind kind, String ucId, String fpId, String label) {
+            this(kind, null, ucId, fpId, label);
+        }
+
+        public NodeData(Kind kind, String areaId, String ucId, String fpId, String label) {
             this.kind = kind;
+            this.areaId = areaId;
             this.ucId = ucId;
             this.fpId = fpId;
             this.label = label;
@@ -81,13 +90,29 @@ public final class CosmicTreeModelBuilder {
         return null;
     }
 
-    /** Il figlio diretto di {@code root} che rappresenta lo use case {@code ucId}, o null. */
+    /** Il nodo (dentro il suo nodo d'area) che rappresenta lo use case {@code ucId}, o null. */
     public static DefaultMutableTreeNode findUseCaseNode(DefaultMutableTreeNode root, String ucId) {
         if (ucId == null) return null;
         for (Enumeration<?> e = root.children(); e.hasMoreElements(); ) {
             DefaultMutableTreeNode child = (DefaultMutableTreeNode) e.nextElement();
             NodeData d = dataOf(child);
-            if (d != null && d.kind == NodeData.Kind.USE_CASE && ucId.equals(d.ucId)) return child;
+            if (d == null) continue;
+            if (d.kind == NodeData.Kind.USE_CASE && ucId.equals(d.ucId)) return child;
+            if (d.kind == NodeData.Kind.AREA) {
+                DefaultMutableTreeNode inArea = findUseCaseNode(child, ucId);
+                if (inArea != null) return inArea;
+            }
+        }
+        return null;
+    }
+
+    /** v5.0 - Il figlio diretto di {@code root} che rappresenta l'area {@code areaId}, o null. */
+    public static DefaultMutableTreeNode findAreaNode(DefaultMutableTreeNode root, String areaId) {
+        if (areaId == null) return null;
+        for (Enumeration<?> e = root.children(); e.hasMoreElements(); ) {
+            DefaultMutableTreeNode child = (DefaultMutableTreeNode) e.nextElement();
+            NodeData d = dataOf(child);
+            if (d != null && d.kind == NodeData.Kind.AREA && areaId.equals(d.areaId)) return child;
         }
         return null;
     }
@@ -96,15 +121,39 @@ public final class CosmicTreeModelBuilder {
         DefaultMutableTreeNode root = node(NodeData.Kind.ROOT, null, null, rootLabel(model.projectName, report.totalCfp));
 
         Map<String, UseCaseReport> reportByUcId = new LinkedHashMap<>();
-        for (UseCaseReport r : report.useCases) {
+        for (UseCaseReport r : report.allUseCases()) {
             reportByUcId.put(r.id, r);
         }
 
-        for (UseCase uc : model.useCases) {
-            root.add(buildUseCaseNode(uc, reportByUcId.get(uc.id)));
+        for (FunctionalArea area : model.functionalAreas()) {
+            if (area.useCases().isEmpty()) continue;
+            DefaultMutableTreeNode areaNode = buildAreaNode(area, report.findArea(area.id));
+            for (UseCase uc : area.useCases()) {
+                areaNode.add(buildUseCaseNode(uc, reportByUcId.get(uc.id)));
+            }
+            root.add(areaNode);
         }
 
         return root;
+    }
+
+    /** v5.0 - Nodo (senza figli) di un'area funzionale; i nodi use case si aggiungono con {@link #buildUseCaseNode}. */
+    public static DefaultMutableTreeNode buildAreaNode(FunctionalArea area, AreaReport areaReport) {
+        return new DefaultMutableTreeNode(new NodeData(NodeData.Kind.AREA, area.id, null, null,
+                areaLabel(area.label(), area.subsystem, areaReport == null ? 0 : areaReport.totalCfp,
+                        areaReport == null ? 0 : areaReport.useCases.size())));
+    }
+
+    /** v5.0 - Come sopra, partendo dal solo report (la UI incrementale non ha il modello sotto mano). */
+    public static DefaultMutableTreeNode buildAreaNode(AreaReport areaReport) {
+        return new DefaultMutableTreeNode(new NodeData(NodeData.Kind.AREA, areaReport.id, null, null,
+                areaLabel(areaReport.label, areaReport.subsystem, areaReport.totalCfp, areaReport.useCases.size())));
+    }
+
+    /** Etichetta del nodo d'area: nome + totale CFP dell'area + numero di use case. */
+    public static String areaLabel(String label, String subsystem, int totalCfp, int useCases) {
+        return "Area [" + label + "] -> " + totalCfp + " CFP, " + useCases + " use case"
+                + (subsystem != null && !subsystem.isBlank() ? "  (" + subsystem + ")" : "");
     }
 
     /**

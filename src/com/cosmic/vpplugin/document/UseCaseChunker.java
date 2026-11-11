@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -29,6 +30,26 @@ import java.util.regex.Pattern;
  *     non contiene alcuna struttura riconoscibile, e viene riportato nei warning.
  *
  * Gli ID duplicati vengono resi univoci ("UC-1", "UC-1~2"), cosi' nessuno use case ne sovrascrive un altro.
+ *
+ * <h3>v5.0 - Gerarchia del documento: sottosistema -> area funzionale -> use case</h3>
+ * Un documento ben strutturato (ALBERGATE) ha tre livelli di titolo:
+ * <pre>
+ *   # PRE - Booking                              sottosistema   (UseCaseChunk.subsystem)
+ *   ## F-PRE-04: Commissioned rooms management   AREA FUNZIONALE (UseCaseChunk.functionalArea*)
+ *   ### F-PRE-04.5: Add commissioned room        use case
+ * </pre>
+ * L'area e' il raggruppamento GENITORE dello use case. Regole (strategia 1, titoli + tabelle):
+ * <ul>
+ *   <li>se i titoli degli use case hanno almeno DUE livelli di raggruppamento sopra di loro, il piu' alto e' il
+ *       sottosistema e il successivo e' l'area;</li>
+ *   <li>uno use case che e' esso stesso al livello dell'area (es. {@code F-SOG-03: Telephone bill} sotto il solo
+ *       sottosistema) e' l'unico use case della propria area; lo stesso vale per un titolo che e' use case E
+ *       contenitore di altri ({@code F-PRE-00: Book a room} con i suoi F-PRE-01/02): l'area e' quel titolo;</li>
+ *   <li>se esiste UN SOLO livello di raggruppamento, quello e' l'area e non c'e' sottosistema;</li>
+ *   <li>nessun raggruppamento (testo piatto, strategie 2-4): area null; il modello usa l'area di default.</li>
+ * </ul>
+ * Un titolo d'area puo' avere piu' codici ("F-PRE-07, 05, 06: Reservation Management") e una numerazione
+ * letterale davanti ("2.4 F-PRE-04: ..."): entrambi sono gestiti da {@link #parseAreaTitle}.
  */
 public final class UseCaseChunker {
 
@@ -50,6 +71,11 @@ public final class UseCaseChunker {
     private static final Pattern TITLE_UC_ID = Pattern.compile(
             "(?i)^\\s*(?:use\\s*case\\s+)?(" + UC_ID + ")(?:\\s*[:\\-–—.)]\\s+|\\s+)(.+?)\\s*$");
     private static final Pattern INCLUDE_REF = Pattern.compile("(?i)\\binclude[sd]?\\s+(?:the\\s+)?(?:use\\s+case\\s+)?(" + UC_ID + ")");
+    /** Titolo d'area: uno o piu' codici ("F-PRE-07, 05, 06") + separatore + nome. */
+    private static final Pattern AREA_TITLE = Pattern.compile(
+            "^\\s*(" + REF_ID + "(?:\\s*,\\s*[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)*)\\s*[:\\-\\u2013\\u2014]\\s*(.+?)\\s*$");
+    /** Numerazione letterale davanti al titolo ("2.4 F-PRE-04: ..."): solo la forma a piu' livelli, o un numero seguito da un codice F-. */
+    private static final Pattern HEADING_NUMBERING = Pattern.compile("^(?:\\d+(?:\\.\\d+)+[.)]?\\s+|\\d+[.)]?\\s+(?=F[-_]))");
     private static final Pattern TOC_LINE = Pattern.compile(".*(?:\\.{3,}|\\t)\\s*\\d+\\s*$");
 
     private static final int SIZE_FALLBACK_CHARS = 3500;
@@ -99,7 +125,21 @@ public final class UseCaseChunker {
             warnings.add("ATTENZIONE: nessuna struttura di use case riconoscibile (ne' titoli ne' 'MAIN SCENARIO'). "
                     + "Il testo e' stato suddiviso per dimensione (BLOCK-001, ...): gli ID originali non sono recuperabili.");
         }
-        return new ChunkingResult(finalizeBlocks(blocks, strategy, warnings), strategy, warnings);
+        List<UseCaseChunk> chunks = finalizeBlocks(blocks, strategy, warnings);
+        int withoutArea = 0;
+        for (UseCaseChunk c : chunks) {
+            if (c.functionalArea == null) {
+                withoutArea++;
+            }
+        }
+        if (withoutArea == chunks.size()) {
+            warnings.add("Nessuna area funzionale riconosciuta (servono titoli a piu' livelli: sottosistema > area > use case): "
+                    + "tutti gli use case finiscono nell'area '" + com.cosmic.vpplugin.model.CosmicJsonModel.DEFAULT_AREA_NAME + "'.");
+        } else if (withoutArea > 0) {
+            warnings.add(withoutArea + " use case senza area funzionale riconosciuta: finiscono nell'area '"
+                    + com.cosmic.vpplugin.model.CosmicJsonModel.DEFAULT_AREA_NAME + "'.");
+        }
+        return new ChunkingResult(chunks, strategy, warnings);
     }
 
     // ------------------------------------------------------------------ blocchi grezzi
@@ -109,6 +149,10 @@ public final class UseCaseChunker {
         String idFromTitle;           // id ricavato dal titolo ("UC-...", "F-..."), puo' essere null
         String nameFromTitle;         // nome ricavato dal titolo
         String subsystem;
+        int level;                    // livello del titolo (1..6); 0 se il blocco non viene da un titolo
+        String[] chain;               // titoli antenati per livello (indice = livello), compreso il titolo stesso
+        String areaRef;               // v5.0: codice dell'area funzionale ("F-PRE-04")
+        String areaName;              // v5.0: nome dell'area funzionale ("Commissioned rooms management")
         final List<String> lines = new ArrayList<>();
         int scenarioStart = -1;       // indice in lines della riga "MAIN SCENARIO"; -1 = nessuno
     }
@@ -140,6 +184,8 @@ public final class UseCaseChunker {
                 }
                 cur = new RawBlock();
                 cur.headingTitle = title;
+                cur.level = level;
+                cur.chain = stack.clone();
                 for (int k = 1; k < level; k++) {          // antenato di livello piu' alto = sottosistema
                     if (stack[k] != null) {
                         cur.subsystem = stack[k];
@@ -159,7 +205,69 @@ public final class UseCaseChunker {
                 ucs.add(b);
             }
         }
+        assignFunctionalAreas(ucs);
         return ucs;
+    }
+
+    /**
+     * v5.0 - Ricava l'area funzionale di ogni use case dalla gerarchia dei titoli (vedi javadoc di classe). La
+     * decisione "c'e' un livello di sottosistema?" e' presa sull'INTERO documento, non use case per use case: in un
+     * documento a due livelli (gruppo > use case) il gruppo e' l'area, mentre in ALBERGATE (sottosistema > area >
+     * use case) il primo livello e' il sottosistema anche per gli use case senza figli (F-SOG-03).
+     */
+    private static void assignFunctionalAreas(List<RawBlock> ucs) {
+        Set<Integer> groupLevels = new TreeSet<>();
+        for (RawBlock b : ucs) {
+            for (int k = 1; k < b.level; k++) {
+                if (b.chain[k] != null) {
+                    groupLevels.add(k);
+                }
+            }
+        }
+        boolean hasSubsystemLevel = groupLevels.size() >= 2;
+        for (RawBlock b : ucs) {
+            int first = 0;                                   // livello del primo antenato (0 = nessuno)
+            for (int k = 1; k < b.level; k++) {
+                if (b.chain[k] != null) {
+                    first = k;
+                    break;
+                }
+            }
+            if (first == 0) {
+                continue;                                    // use case al livello piu' alto: nessun raggruppamento
+            }
+            String areaTitle;
+            if (!hasSubsystemLevel) {
+                areaTitle = b.chain[first];                  // un solo livello di raggruppamento: e' l'area
+                b.subsystem = null;
+            } else {
+                int next = first + 1;                        // primo titolo dopo il sottosistema (al piu' il titolo stesso)
+                while (next < b.level && b.chain[next] == null) {
+                    next++;
+                }
+                areaTitle = b.chain[next];
+            }
+            String[] parsed = parseAreaTitle(areaTitle);
+            b.areaRef = parsed[0];
+            b.areaName = parsed[1];
+        }
+    }
+
+    /**
+     * "F-PRE-04: Commissioned rooms management" -> {"F-PRE-04", "Commissioned rooms management"};
+     * "F-PRE-07, 05, 06: Reservation Management" -> {"F-PRE-07, 05, 06", "Reservation Management"};
+     * "2.4 F-PRE-04: ..." -> numerazione letterale scartata; senza codice -> {null, titolo intero}.
+     */
+    static String[] parseAreaTitle(String title) {
+        if (title == null) {
+            return new String[]{null, null};
+        }
+        String t = clean(HEADING_NUMBERING.matcher(clean(title)).replaceFirst(""));
+        Matcher m = AREA_TITLE.matcher(t);
+        if (m.matches()) {
+            return new String[]{m.group(1).replaceAll("\\s*,\\s*", ", "), clean(m.group(2))};
+        }
+        return new String[]{null, t.isEmpty() ? null : t};
     }
 
     // 2) regex sui titoli (testo piatto) ----------------------------------------
@@ -371,6 +479,7 @@ public final class UseCaseChunker {
             includes.remove(id);
 
             chunks.add(new UseCaseChunk(chunks.size() + 1, unique, name, reference, b.subsystem,
+                    b.areaRef, b.areaName,
                     parseActors(actorRaw), new ArrayList<>(includes), scenario));
         }
         return chunks;

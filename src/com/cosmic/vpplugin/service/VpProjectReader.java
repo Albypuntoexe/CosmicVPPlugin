@@ -5,6 +5,7 @@ import com.cosmic.vpplugin.generator.UseCaseDescription;
 import com.vp.plugin.model.IActor;
 import com.vp.plugin.model.IProject;
 import com.vp.plugin.model.IUseCase;
+import com.vp.plugin.model.IModelElement;
 import com.vp.plugin.model.factory.IModelElementFactory;
 
 import java.lang.reflect.InvocationTargetException;
@@ -37,11 +38,14 @@ final class VpProjectReader {
         final String name;
         /** Descrizione grezza cosi' come sta su VP. */
         final String description;
+        /** v5.0 - Id dell'elemento che CONTIENE lo use case (il package dell'area funzionale), null se non disponibile. */
+        final String parentVpId;
 
-        UseCaseSnap(String vpId, String name, String description) {
+        UseCaseSnap(String vpId, String name, String description, String parentVpId) {
             this.vpId = vpId;
             this.name = name;
             this.description = description;
+            this.parentVpId = parentVpId;
         }
     }
 
@@ -85,7 +89,12 @@ final class VpProjectReader {
             if (!(o instanceof IUseCase)) continue;
             IUseCase uc = (IUseCase) o;
             String desc = uc.getDescription();
-            snap.useCases.add(new UseCaseSnap(uc.getId(), safe(uc.getName()), desc == null ? "" : desc));
+            String parentId = null;
+            try {
+                IModelElement parent = uc.getParent();
+                parentId = parent == null ? null : parent.getId();
+            } catch (Exception ignored) { /* edizione di VP senza getParent: lo use case finira' nell'area del diagramma attivo */ }
+            snap.useCases.add(new UseCaseSnap(uc.getId(), safe(uc.getName()), desc == null ? "" : desc, parentId));
         }
         for (Object o : elementsOfType(project, IModelElementFactory.MODEL_TYPE_ACTOR)) {
             if (o instanceof IActor) snap.actors.add(new ActorSnap(((IActor) o).getId(), safe(((IActor) o).getName())));

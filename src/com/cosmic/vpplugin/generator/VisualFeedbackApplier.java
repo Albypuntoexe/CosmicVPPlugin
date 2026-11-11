@@ -24,10 +24,10 @@ public final class VisualFeedbackApplier {
     /** Applica CFP + violazioni a TUTTI gli use case del modello (uso: ricalcoli globali). */
     public static void applyAll(CosmicJsonModel model, CosmicReport report) {
         Map<String, UseCaseReport> cfpById = new LinkedHashMap<>();
-        for (UseCaseReport r : report.useCases) {
+        for (UseCaseReport r : report.allUseCases()) {
             cfpById.put(r.id, r);
         }
-        for (UseCase ucDto : model.useCases) {
+        for (UseCase ucDto : model.allUseCases()) {
             applyToUseCase(ucDto, cfpById.get(ucDto.id));
         }
     }

@@ -57,7 +57,7 @@ public final class CosmicJsonMapper {
             actor.id = str(a.get("id"), null);
             actor.name = str(a.get("name"), "Attore");
             actor.description = str(a.get("description"), "");
-            model.actors.add(actor);
+            model.defaultArea().addActor(actor);   // v5.0: il JSON dell'LLM e' piatto -> tutto nell'area di default
         }
 
         for (Object rawUc : list(root.get("useCases"))) {
@@ -131,7 +131,7 @@ public final class CosmicJsonMapper {
                 uc.functionalProcesses.add(fp);
             }
 
-            model.useCases.add(uc);
+            model.defaultArea().addUseCase(uc);
         }
 
         return model;

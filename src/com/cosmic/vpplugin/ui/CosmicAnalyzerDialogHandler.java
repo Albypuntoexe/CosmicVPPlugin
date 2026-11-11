@@ -1,6 +1,7 @@
 package com.cosmic.vpplugin.ui;
 
 import com.cosmic.vpplugin.calculator.CosmicCalculator;
+import com.cosmic.vpplugin.calculator.CosmicCalculator.AreaReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.CosmicReport;
 import com.cosmic.vpplugin.calculator.CosmicCalculator.UseCaseReport;
 import com.cosmic.vpplugin.model.CosmicJsonModel;
@@ -606,16 +607,29 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
                                    int processed, int total) {
         ucById.put(useCase.id, useCase);
         DefaultMutableTreeNode node = CosmicTreeModelBuilder.buildUseCaseNode(useCase, useCaseReport);
+        // v5.0: lo use case vive dentro il nodo della sua area funzionale (creato al primo use case dell'area)
+        AreaReport areaReport = projectReport.findArea(useCase.areaId);
+        DefaultMutableTreeNode areaNode = CosmicTreeModelBuilder.findAreaNode(treeRoot, useCase.areaId);
+        if (areaNode == null && areaReport != null) {
+            areaNode = CosmicTreeModelBuilder.buildAreaNode(areaReport);
+            treeModel.insertNodeInto(areaNode, treeRoot, treeRoot.getChildCount());
+        }
+        DefaultMutableTreeNode parent = areaNode != null ? areaNode : treeRoot;
         DefaultMutableTreeNode old = CosmicTreeModelBuilder.findUseCaseNode(treeRoot, useCase.id);
         if (old == null) {
-            treeModel.insertNodeInto(node, treeRoot, treeRoot.getChildCount());
+            treeModel.insertNodeInto(node, parent, parent.getChildCount());
         } else {
             Set<String> expanded = expandedKeys();
             Object selected = selectedKey();
-            int index = treeRoot.getIndex(old);
+            DefaultMutableTreeNode oldParent = (DefaultMutableTreeNode) old.getParent();
+            int index = oldParent.getIndex(old);
             treeModel.removeNodeFromParent(old);
-            treeModel.insertNodeInto(node, treeRoot, index);
+            treeModel.insertNodeInto(node, oldParent, index);
             restoreTreeState(expanded, selected, false);
+        }
+        if (areaNode != null && areaReport != null) {                    // totale CFP dell'area aggiornato
+            areaNode.setUserObject(((DefaultMutableTreeNode) CosmicTreeModelBuilder.buildAreaNode(areaReport)).getUserObject());
+            treeModel.nodeChanged(areaNode);
         }
         treeRoot.setUserObject(CosmicTreeModelBuilder.rootLabel(projectReport.projectName, projectReport.totalCfp));
         treeModel.nodeChanged(treeRoot);
@@ -637,7 +651,7 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         boolean firstBuild = treeRoot.getChildCount() == 0 || !(treeRoot.getUserObject() instanceof NodeData);
 
         ucById.clear();
-        for (UseCase uc : model.useCases) ucById.put(uc.id, uc);
+        for (UseCase uc : model.allUseCases()) ucById.put(uc.id, uc);
 
         DefaultMutableTreeNode newRoot = CosmicTreeModelBuilder.buildTree(model, report);
         treeRoot.removeAllChildren();
@@ -651,7 +665,7 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         SwingUtilities.invokeLater(this::showEditorForSelection);
 
         if (!busy) {
-            exportCsvButton.setEnabled(!model.useCases.isEmpty());
+            exportCsvButton.setEnabled(model.hasUseCases());
             progressBar.setIndeterminate(false);
             if (progressBar.getMaximum() > 0 && progressBar.getValue() >= progressBar.getMaximum()) {
                 progressLabel.setText("Analisi terminata.");
@@ -698,6 +712,7 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         NodeData d = CosmicTreeModelBuilder.dataOf(n);
         if (d == null) return n.isRoot() ? "ROOT" : null;
         if (d.kind == NodeData.Kind.ROOT) return "ROOT";
+        if (d.kind == NodeData.Kind.AREA) return "AREA|" + d.areaId;
         if (d.kind == NodeData.Kind.USE_CASE) return "UC|" + d.ucId;
         if (d.kind == NodeData.Kind.FUNCTIONAL_PROCESS) return "FP|" + d.ucId + "|" + d.fpId;
         return null;   // sotto-processi e righe informative: non servono come chiave di ripristino
