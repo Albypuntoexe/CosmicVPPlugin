@@ -87,6 +87,18 @@ public final class CosmicJsonModel {
     }
 
     /**
+     * v5.1 - L'area il cui CONTENITORE su VP ha questo id: il package dell'area oppure il suo System Boundary
+     * ({@code ISystem}), che dalla v5.1 e' il genitore diretto degli {@code IUseCase} dell'area.
+     */
+    public FunctionalArea findAreaByContainerId(String vpContainerId) {
+        if (vpContainerId == null) return null;
+        for (FunctionalArea a : areas) {
+            if (vpContainerId.equals(a.vpSystemId) || vpContainerId.equals(a.vpPackageId)) return a;
+        }
+        return null;
+    }
+
+    /**
      * Restituisce l'area identificata da {@code ref} (es. "F-PRE-04"), oppure da {@code subsystem + nome} se il
      * documento non da' un codice; la crea se non esiste. Con ref e nome entrambi vuoti: l'area di default.
      */
@@ -173,6 +185,35 @@ public final class CosmicJsonModel {
         return null;
     }
 
+    /**
+     * v5.1 - TUTTI gli {@link Actor} (uno per area) che puntano allo stesso {@code IActor} su VP: lo stesso attore
+     * del database puo' comparire in piu' aree, ognuna con la sua vista e il suo elenco di ruoli.
+     */
+    public List<Actor> findActorsByVpId(String vpElementId) {
+        List<Actor> out = new ArrayList<>();
+        if (vpElementId == null) return out;
+        for (FunctionalArea a : areas) for (Actor x : a.actors) if (vpElementId.equals(x.vpElementId)) out.add(x);
+        return out;
+    }
+
+    /** Chiave di confronto dei nomi di attore (senza maiuscole, spazi multipli ridotti): "Hotel  Manager" == "hotel manager". */
+    public static String actorKey(String name) {
+        return name == null ? "" : name.trim().replaceAll("\\s+", " ").toLowerCase();
+    }
+
+    /**
+     * v5.1 - Id dell'{@code IActor} (unico nel database) gia' assegnato a un attore con questo nome in QUALSIASI
+     * area; null se nessuna area ne ha ancora uno. Serve a far condividere lo stesso elemento VP a tutte le aree.
+     */
+    public String sharedActorVpId(String name) {
+        String key = actorKey(name);
+        if (key.isEmpty()) return null;
+        for (FunctionalArea a : areas) {
+            for (Actor x : a.actors) if (x.vpElementId != null && key.equals(actorKey(x.name))) return x.vpElementId;
+        }
+        return null;
+    }
+
     // ======================================================================
     // Modifiche strutturali con pulizia delle relazioni
     // ======================================================================
@@ -229,6 +270,8 @@ public final class CosmicJsonModel {
         public String subsystem;
         /** IModelElement.getId() dell'{@code IPackage} creato su VP per quest'area (null finche' non generato). */
         public String vpPackageId;
+        /** v5.1 - IModelElement.getId() dell'{@code ISystem} (System Boundary) dell'area: genitore degli use case (null finche' non generato). */
+        public String vpSystemId;
         /** IDiagramUIModel.getId() del diagramma use case dell'area (null finche' non generato). */
         public String diagramId;
 
@@ -270,11 +313,18 @@ public final class CosmicJsonModel {
             return null;
         }
 
-        /** Attore dell'area con questo nome (confronto senza maiuscole/minuscole), null se non c'e'. */
+        /** Attore dell'area con questo nome (confronto senza maiuscole/minuscole e spazi multipli), null se non c'e'. */
         public Actor findActorByName(String name) {
             if (name == null) return null;
-            String key = name.trim().toLowerCase();
-            for (Actor a : actors) if (a.name != null && a.name.trim().toLowerCase().equals(key)) return a;
+            String key = actorKey(name);
+            for (Actor a : actors) if (a.name != null && actorKey(a.name).equals(key)) return a;
+            return null;
+        }
+
+        /** Attore DI QUESTA AREA che punta all'{@code IActor} VP con questo id (piu' aree possono condividerlo). */
+        public Actor findActorByVpId(String vpElementId) {
+            if (vpElementId == null) return null;
+            for (Actor a : actors) if (vpElementId.equals(a.vpElementId)) return a;
             return null;
         }
     }

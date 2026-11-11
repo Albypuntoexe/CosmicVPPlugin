@@ -35,7 +35,7 @@ import java.util.Set;
  *   "schemaVersion": 3,
  *   "projectName": "...",
  *   "functionalAreas": [
- *     { "id": "F-PRE-04", "name": "...", "subsystem": "...", "vpPackageId": "...", "diagramId": "...",
+ *     { "id": "F-PRE-04", "name": "...", "subsystem": "...", "vpPackageId": "...", "vpSystemId": "...", "diagramId": "...",
  *       "actors":   [ { "id", "name", "description", "vpElementId" } ],
  *       "useCases": [ { ...use case completo con functionalProcesses... } ] }
  *   ],
@@ -111,6 +111,7 @@ public final class CosmicModelSerializer {
         field(sb, 3, "name", area.name).append(",\n");
         field(sb, 3, "subsystem", area.subsystem).append(",\n");
         field(sb, 3, "vpPackageId", area.vpPackageId).append(",\n");
+        field(sb, 3, "vpSystemId", area.vpSystemId).append(",\n");
         field(sb, 3, "diagramId", area.diagramId).append(",\n");
 
         List<Actor> actors = area.actors();
@@ -234,6 +235,7 @@ public final class CosmicModelSerializer {
             if (id == null || id.trim().isEmpty()) continue;            // area non riagganciabile: scartata
             FunctionalArea area = m.findOrCreateArea(id, str(am.get("name"), null), str(am.get("subsystem"), null));
             area.vpPackageId = str(am.get("vpPackageId"), null);
+            area.vpSystemId = str(am.get("vpSystemId"), null);
             area.diagramId = str(am.get("diagramId"), null);
 
             for (Object o : list(am.get("actors"))) {

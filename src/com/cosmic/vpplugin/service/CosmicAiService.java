@@ -664,6 +664,8 @@ public final class CosmicAiService {
         actor.id = model.nextActorId();
         actor.name = name.trim();
         actor.description = "";
+        // v5.1 - stesso nome in un'altra area: stesso IActor nel database (qui nasce solo il ruolo dell'area).
+        actor.vpElementId = model.sharedActorVpId(name);
         area.addActor(actor);
         return actor;
     }
@@ -1094,10 +1096,10 @@ public final class CosmicAiService {
                 }
                 recomputeAndPublish("Rinominato use case '" + old + "' -> '" + newName + "': CFP ricalcolati.", dto);
             } else if (element instanceof IActor) {
-                Actor actor = findActorByVpElementId(element.getId());
-                if (actor == null || newName.equals(actor.name)) return;
-                String old = actor.name;
-                actor.name = newName;
+                List<Actor> sharing = currentModel.findActorsByVpId(element.getId());   // v5.1: un IActor, una voce per area
+                if (sharing.isEmpty() || newName.equals(sharing.get(0).name)) return;
+                String old = sharing.get(0).name;
+                for (Actor actor : sharing) actor.name = newName;
                 recomputeAndPublish("Rinominato attore '" + old + "' -> '" + newName + "'.", null);
             }
         });
@@ -1164,7 +1166,7 @@ public final class CosmicAiService {
      * contiene; altrimenti quella del DIAGRAMMA attivo; altrimenti l'area di default.
      */
     private static FunctionalArea areaForNewUseCase(CosmicJsonModel model, String parentVpId, String activeDiagramId) {
-        FunctionalArea a = model.findAreaByPackageId(parentVpId);
+        FunctionalArea a = model.findAreaByContainerId(parentVpId);   // genitore = ISystem (v5.1) o package (v5.0)
         if (a == null) a = model.findAreaByDiagramId(activeDiagramId);
         return a != null ? a : model.defaultArea();
     }
@@ -1219,7 +1221,7 @@ public final class CosmicAiService {
 
     /** L'attore VP e' gia' tracciato (in qualsiasi area)? Altrimenti se ne crea uno nell'area dello use case. */
     private Actor findOrCreateActor(IActor vpActor, FunctionalArea area) {
-        Actor byId = findActorByVpElementId(vpActor.getId());
+        Actor byId = area == null ? findActorByVpElementId(vpActor.getId()) : area.findActorByVpId(vpActor.getId());
         if (byId != null) return byId;
         Actor actor = findOrCreateActorByName(currentModel, area, safeTrim(vpActor.getName()).isEmpty() ? "Actor" : vpActor.getName());
         if (actor.vpElementId == null) actor.vpElementId = vpActor.getId();
@@ -1610,7 +1612,8 @@ public final class CosmicAiService {
     }
 
     private static Actor resolveActor(CosmicJsonModel model, VpProjectReader.Snapshot snap, FunctionalArea area, String actorVpId) {
-        for (Actor a : model.allActors()) if (actorVpId.equals(a.vpElementId)) return a;
+        Actor inArea = area == null ? model.findActorByVpId(actorVpId) : area.findActorByVpId(actorVpId);   // v5.1: l'IActor puo' essere condiviso tra aree
+        if (inArea != null) return inArea;
         for (VpProjectReader.ActorSnap s : snap.actors) {
             if (!s.vpId.equals(actorVpId)) continue;
             Actor a = findOrCreateActorByName(model, area, s.name.isEmpty() ? "Actor" : s.name);
