@@ -29,8 +29,6 @@ import com.vp.plugin.model.ISystem;
 import com.vp.plugin.model.IUseCase;
 import com.vp.plugin.model.factory.IModelElementFactory;
 
-import java.awt.Color;
-import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -50,7 +48,7 @@ import java.util.function.Consumer;
 /**
  * Traduce il modello COSMIC in Use Case Diagram reali di Visual Paradigm, UNO USE CASE ALLA VOLTA.
  *
- * <h3>Separazione MODEL / VIEW (v5.0–v5.3)</h3>
+ * <h3>Separazione MODEL / VIEW (v5.0–v5.4)</h3>
  * In Visual Paradigm ogni cosa ha due facce:
  * <ul>
  *   <li><b>MODEL</b>: l'elemento nel database del progetto ({@code IUseCase}, {@code IActor}, {@code IInclude},
@@ -61,24 +59,17 @@ import java.util.function.Consumer;
  *       view", le altre "auxiliary view").</li>
  * </ul>
  *
- * <h3>Correzioni permanenti v5.3 (rendering, stile UML, caption, auto-layout e Z-order)</h3>
+ * <h3>Correzioni di rendering v5.4 (solo grafica/layout, nessuna modifica alla logica COSMIC)</h3>
  * <ul>
- *   <li><b>System Boundary trasparente/bianco</b>: rimuove il riempimento azzurro pieno di default di VP tramite
- *       {@code IFillColor} (via reflection su interfacce pubbliche, zero dipendenze di versione) cosi' il boundary
- *       ha lo stile UML standard e non puo' mai coprire visivamente uno use case figlio.</li>
+ *   <li><b>System Boundary con colore blu di default di VP</b>: nessun override del colore di riempimento.</li>
+ *   <li><b>Fix visibilita' degli UC (es. F-SOG-07 Checkout)</b>: il diagramma viene aperto solo dopo aver inserito
+ *       il primo use case nel boundary, lo Z-order garantisce il boundary in fondo e gli use case in primo piano,
+ *       e a fine generazione il focus torna sul primo diagramma per forzare il flush grafico dell'ultimo tab.</li>
  *   <li><b>Caption di Attori e relazioni {@code <<include>>}/{@code <<extend>>}</b>: invoca {@code resetCaption()}
- *       e abilita {@code ICaptionUIModel} sia alla creazione sia dopo il layout, cosi' i nomi degli attori sotto gli
- *       omini e le etichette sulle frecce tratteggiate compaiono sempre.</li>
- *   <li><b>Auto-layout reale senza distruzione post-layout</b>: apre esplicitamente ogni diagramma, invoca
- *       {@code openAndLayoutDiagram} (via reflection, con ripiego su {@code layout(diagram, LAYOUT_*)}) e NON chiama
- *       piu' {@code enforceBoundary} quando il layout di VP e' andato a buon fine (prima spostare il boundary dopo
- *       il layout traslava i figli e sovrapponeva le linee).</li>
- *   <li><b>Fix glitch dell'ultimo diagramma (es. F-SOG-07)</b>: il diagramma viene aperto solo dopo aver inserito
- *       almeno il primo use case nel boundary, lo Z-order dei figli viene forzato in primo piano, e a fine
- *       generazione il focus torna sul primo diagramma per forzare il flush grafico dell'ultimo tab.</li>
- *   <li><b>Ripulitura istantanea di progetti gia' generati</b>: {@link #polishExistingDiagrams(Consumer)} applica
- *       stile boundary, caption, Z-order e auto-layout a tutti gli Use Case Diagram gia' presenti nel progetto
- *       aperto, senza dover rilanciare l'LLM.</li>
+ *       e abilita {@code ICaptionUIModel} cosi' i nomi sotto gli omini e sulle frecce sono sempre visibili.</li>
+ *   <li><b>Auto-layout nativo senza rotture post-layout</b>: usa {@code openAndLayoutDiagram(option)} via reflection
+ *       (compatibile con tutte le edizioni VP, zero errori di compilazione su {@code LayoutOption}) e non sovrascrive
+ *       il boundary con {@code enforceBoundary} quando il layout di VP e' gia' andato a buon fine.</li>
  * </ul>
  *
  * TUTTI i metodi pubblici vanno invocati sul thread grafico (EDT): l'Open API di VP non e' thread-safe.
@@ -282,7 +273,6 @@ public final class UseCaseDiagramGenerator {
         if (!st.opened) {
             st.opened = true;
             diagramManager.openDiagram(st.diagram);
-            styleSystemBoundary(st.boundary);
             for (IActorUIModel a : st.actorViews.values()) {
                 refreshCaption(a);
             }
@@ -299,8 +289,8 @@ public final class UseCaseDiagramGenerator {
     }
 
     /**
-     * Chiude la sessione: segnala le relazioni mai risolte, applica auto-layout, stile UML del boundary,
-     * Z-order dei figli e caption su OGNI diagramma ormai completo, e riporta il focus sul primo diagramma.
+     * Chiude la sessione: segnala le relazioni mai risolte, applica auto-layout, Z-order dei figli e caption
+     * su OGNI diagramma ormai completo, e riporta il focus sul primo diagramma.
      */
     public void finish() {
         flushPendingRelations(true);
@@ -344,95 +334,6 @@ public final class UseCaseDiagramGenerator {
     }
 
     // ------------------------------------------------------------------
-    // Ripulitura istantanea di tutti gli Use Case Diagram GIA' presenti su VP
-    // ------------------------------------------------------------------
-
-    /**
-     * v5.3 - Applica stile trasparente/bianco ai System Boundary, ripristina le caption di Attori e connettori
-     * {@code <<include>>}/{@code <<extend>>}, porta gli Use Case in primo piano e rilancia l'auto-layout su TUTTI
-     * gli Use Case Diagram del progetto attualmente aperto in Visual Paradigm (senza toccare il modello ne' l'LLM).
-     * Va invocato sull'EDT.
-     */
-    public static int polishExistingDiagrams(LayoutStyle style, Consumer<String> logSink) {
-        Consumer<String> log = (logSink != null) ? logSink : (m -> { });
-        LayoutStyle effectiveStyle = (style != null) ? style : LayoutStyle.HIERARCHICAL;
-        IProject project = ApplicationManager.instance().getProjectManager().getProject();
-        if (project == null) {
-            log.accept("Nessun progetto aperto in Visual Paradigm.");
-            return 0;
-        }
-        DiagramManager dm = ApplicationManager.instance().getDiagramManager();
-        List<IUseCaseDiagramUIModel> diagrams = findAllUseCaseDiagrams(project);
-        if (diagrams.isEmpty()) {
-            log.accept("Nessun Use Case Diagram trovato nel progetto aperto.");
-            return 0;
-        }
-
-        int polished = 0;
-        int boundariesStyled = 0;
-        int captionsFixed = 0;
-        IUseCaseDiagramUIModel first = diagrams.get(0);
-
-        for (IUseCaseDiagramUIModel d : diagrams) {
-            try {
-                dm.openDiagram(d);
-            } catch (RuntimeException ignored) { }
-
-            List<IDiagramElement> elements = elementsOfDiagram(d);
-            List<ISystemUIModel> systems = new ArrayList<>();
-            List<IUseCaseUIModel> useCases = new ArrayList<>();
-            List<IActorUIModel> actors = new ArrayList<>();
-            List<IDiagramElement> relConnectors = new ArrayList<>();
-
-            for (IDiagramElement el : elements) {
-                if (el instanceof ISystemUIModel) {
-                    systems.add((ISystemUIModel) el);
-                } else if (el instanceof IUseCaseUIModel) {
-                    useCases.add((IUseCaseUIModel) el);
-                } else if (el instanceof IActorUIModel) {
-                    actors.add((IActorUIModel) el);
-                } else if (isRelationConnector(el)) {
-                    relConnectors.add(el);
-                }
-            }
-
-            if (effectiveStyle != LayoutStyle.NONE) {
-                runVpLayoutOn(dm, d, effectiveStyle, d.getName(), log);
-            }
-
-            for (ISystemUIModel sys : systems) {
-                styleSystemBoundary(sys);
-                sendToBack(d, sys);
-                boundariesStyled++;
-            }
-            for (IUseCaseUIModel uc : useCases) {
-                bringToFront(d, uc);
-            }
-            for (IActorUIModel actor : actors) {
-                if (refreshCaption(actor)) {
-                    captionsFixed++;
-                }
-            }
-            for (IDiagramElement conn : relConnectors) {
-                if (refreshCaption(conn)) {
-                    captionsFixed++;
-                }
-            }
-            polished++;
-        }
-
-        if (diagrams.size() > 1) {
-            try {
-                dm.openDiagram(first);
-            } catch (RuntimeException ignored) { }
-        }
-        log.accept("Stile e layout applicati a " + polished + " diagrammi (" + boundariesStyled
-                + " System Boundary resi trasparenti/bianchi, " + captionsFixed
-                + " etichette attori/relazioni ripristinate).");
-        return polished;
-    }
-
-    // ------------------------------------------------------------------
     // Package, boundary e diagramma dell'area
     // ------------------------------------------------------------------
 
@@ -464,10 +365,9 @@ public final class UseCaseDiagramGenerator {
         pkg.addSubDiagram(diagram);                 // il diagramma sta FISICAMENTE dentro il package dell'area
         area.diagramId = diagram.getId();
 
-        // VIEW del System Boundary: creata subito e stilata trasparente/bianca (stile UML pulito).
+        // VIEW del System Boundary: mantiene il colore blu di default di Visual Paradigm.
         ISystemUIModel boundary = (ISystemUIModel) diagramManager.createDiagramElement(diagram, systemModel);
         boundary.setBounds(BOUNDARY_X, BOUNDARY_Y, boundaryWidth(1), boundaryHeight(1));
-        styleSystemBoundary(boundary);
 
         st = new AreaState(area, pkg, systemModel, boundary, diagram);
         areas.put(area.id, st);
@@ -542,7 +442,7 @@ public final class UseCaseDiagramGenerator {
         if (actorView == null) {
             actorView = (IActorUIModel) diagramManager.createDiagramElement(st.diagram, actorModel);
             actorView.setBounds(ACTOR_X, BOUNDARY_Y + BOUNDARY_TITLE + st.actorViews.size() * ACTOR_Y_STEP, ACTOR_W, ACTOR_H);
-            refreshCaption(actorView);                      // fondamentale: rende visibile il nome sotto l'omino
+            refreshCaption(actorView);                      // rende visibile il nome sotto l'omino
             st.actorViews.put(key, actorView);              // fuori dal boundary: NON si aggiunge come figlio
             if (!mastersOfActors.add(key)) {
                 actorAuxiliaryViews++;
@@ -738,13 +638,12 @@ public final class UseCaseDiagramGenerator {
     }
 
     // ------------------------------------------------------------------
-    // Auto-layout, stile UML, Z-order e caption di fine generazione
+    // Auto-layout, Z-order e caption di fine generazione
     // ------------------------------------------------------------------
 
     /**
-     * Apre il diagramma, esegue l'auto-layout di VP (senza sovrascrivere il boundary se il layout riesce!),
-     * applica lo stile trasparente/bianco al System Boundary, garantisce lo Z-order dei figli e rigenera le
-     * caption di attori e relazioni.
+     * Apre il diagramma, esegue l'auto-layout di VP (senza sovrascrivere il boundary se il layout riesce),
+     * garantisce lo Z-order dei figli dentro il boundary blu e rigenera le caption di attori e relazioni.
      *
      * @return nome del meccanismo di layout eseguito, oppure null se nessun layout automatico e' stato eseguito
      */
@@ -758,10 +657,8 @@ public final class UseCaseDiagramGenerator {
             mode = runVpLayoutOn(diagramManager, st.diagram, layoutStyle, st.area.label(), logSink);
         }
 
-        // CRITICO (v5.3): se il layout di VP e' andato a buon fine, VP ha gia' dimensionato il contenitore
-        // ISystemUIModel attorno ai figli e instradato i connettori. Chiamare boundary.setBounds() qui
-        // sposterebbe i figli e romperebbe il layout. enforceBoundary si usa SOLO come ripiego se il layout
-        // non e' disponibile oppure se qualche forma e' rimasta fisicamente sovrapposta/fuori.
+        // Se il layout di VP e' andato a buon fine, VP ha gia' dimensionato il contenitore ISystemUIModel
+        // attorno ai figli e instradato i connettori. enforceBoundary resta solo come ripiego di sicurezza.
         if (mode == null || hasBrokenGeometry(st)) {
             try {
                 enforceBoundary(st);
@@ -770,8 +667,7 @@ public final class UseCaseDiagramGenerator {
             }
         }
 
-        // Stile UML del boundary + Z-order esplicito (impossibile coprire gli ovali)
-        styleSystemBoundary(st.boundary);
+        // Z-order esplicito: boundary blu sempre sullo sfondo, ovali UC sempre davanti
         sendToBack(st.diagram, st.boundary);
         for (IUseCaseUIModel ucView : st.ownedViews) {
             bringToFront(st.diagram, ucView);
@@ -789,14 +685,7 @@ public final class UseCaseDiagramGenerator {
 
     /**
      * Lancia l'auto-layout di Visual Paradigm nel modo piu' compatibile con l'edizione corrente (zero dipendenze
-     * a compile-time da classi interne di {@code LayoutOption}):
-     * <ol>
-     *   <li>{@code openAndLayoutDiagram(diagram, option)} creando l'opzione via reflection
-     *       ({@code createHierarchicLayoutOption} / {@code createHierarchicalLayoutOption} /
-     *       {@code createOrthogonalLayoutOption});</li>
-     *   <li>{@code openAndLayoutDiagram(diagram)} (layout di default di VP per il diagramma);</li>
-     *   <li>{@code layout(diagram, LAYOUT_HIERARCHIC / LAYOUT_ORTHOGONAL)} (API storica compile-verified).</li>
-     * </ol>
+     * a compile-time da classi interne di {@code LayoutOption}).
      */
     private static String runVpLayoutOn(DiagramManager dm, IUseCaseDiagramUIModel diagram,
                                         LayoutStyle style, String label, Consumer<String> log) {
@@ -810,7 +699,7 @@ public final class UseCaseDiagramGenerator {
             // prosegue con i ripieghi
         }
 
-        // 2) openAndLayoutDiagram(diagram) a 1 parametro (equivalente diretto al bottone Auto-Layout di VP)
+        // 2) openAndLayoutDiagram(diagram) a 1 parametro
         try {
             if (invokePublic(dm, "openAndLayoutDiagram", diagram) != InvocationResult.NOT_FOUND) {
                 return "openAndLayoutDiagram";
@@ -838,7 +727,6 @@ public final class UseCaseDiagramGenerator {
             }
             return opt;
         }
-        // VP usa "createHierarchicalLayoutOption" in alcune versioni e "createHierarchicLayoutOption" in altre.
         Object opt = invokeValue(dm, "createHierarchicalLayoutOption");
         if (opt == null) {
             opt = invokeValue(dm, "createHierarchicLayoutOption");
@@ -851,10 +739,6 @@ public final class UseCaseDiagramGenerator {
         return opt;
     }
 
-    /**
-     * Verifica se, dopo il layout, uno use case proprio e' finito fuori dal boundary oppure un attore/vista
-     * ausiliaria e' finito sovrapposto al boundary (es. motore di layout ostile o non container-aware).
-     */
     private static boolean hasBrokenGeometry(AreaState st) {
         if (st.ownedViews.isEmpty()) {
             return false;
@@ -886,11 +770,6 @@ public final class UseCaseDiagramGenerator {
         return false;
     }
 
-    /**
-     * Ripiego di sicurezza quando il layout automatico non e' disponibile o ha lasciato forme sovrapposte:
-     * ricalcola il boundary sugli use case propri, tenendo fermi gli ovali figli anche se VP sposta i figli
-     * insieme al contenitore, e porta fuori attori e viste ausiliarie sovrapposte.
-     */
     private void enforceBoundary(AreaState st) {
         if (st.ownedViews.isEmpty()) {
             return;
@@ -921,8 +800,6 @@ public final class UseCaseDiagramGenerator {
         int bh = (maxY - minY) + BOUNDARY_TITLE + BOUNDARY_PAD;
         st.boundary.setBounds(bx, by, bw, bh);
 
-        // In VP spostare un contenitore puo' traslare i suoi figli del delta (bx - oldBx):
-        // ripristiniamo le coordinate assolute desiderate dei figli cosi' restano esattamente dentro (bx, by, bw, bh).
         for (int i = 0; i < n; i++) {
             IUseCaseUIModel v = st.ownedViews.get(i);
             if (v.getX() != xs[i] || v.getY() != ys[i]) {
@@ -930,7 +807,6 @@ public final class UseCaseDiagramGenerator {
             }
         }
 
-        // Attori: se toccano il boundary vanno a sinistra; viste ausiliarie: a destra.
         for (IActorUIModel a : st.actorViews.values()) {
             if (overlaps(a, bx, by, bw, bh)) {
                 a.setBounds(bx - OUTSIDE_GAP - a.getWidth(), a.getY(), a.getWidth(), a.getHeight());
@@ -949,64 +825,23 @@ public final class UseCaseDiagramGenerator {
     }
 
     // ------------------------------------------------------------------
-    // Helper di stile UML, caption, Z-order e reflection sicura su VP
+    // Helper di caption, Z-order e reflection sicura su VP
     // ------------------------------------------------------------------
 
-    /**
-     * Imposta il System Boundary in stile UML pulito (sfondo trasparente/bianco invece dell'azzurro pieno di default
-     * di VP): in questo modo gli ovali degli use case risaltano chiaramente e il rettangolo non puo' mai coprirli.
-     */
-    private static void styleSystemBoundary(ISystemUIModel boundary) {
-        if (boundary == null) {
+    private static void refreshCaption(IDiagramElement element) {
+        if (element == null) {
             return;
         }
         try {
-            Object fill = invokeValue(boundary, "getFillColor");
-            if (fill != null) {
-                invokePublic(fill, "setColor1", Color.WHITE);
-                invokePublic(fill, "setColor2", Color.WHITE);
-                Integer typeNone = findPublicStaticInt(fill.getClass(), "TYPE_NONE", "STYLE_NONE");
-                if (typeNone != null) {
-                    invokePublic(fill, "setType", typeNone);
-                } else {
-                    Integer typeSolid = findPublicStaticInt(fill.getClass(), "TYPE_SOLID", "STYLE_SOLID");
-                    if (typeSolid != null) {
-                        invokePublic(fill, "setType", typeSolid);
-                    }
-                    invokePublic(fill, "setTransparency", 100);
-                }
-            } else {
-                invokePublic(boundary, "setBackground", Color.WHITE);
-            }
-            invokePublic(boundary, "setOpaque", Boolean.FALSE);
-        } catch (RuntimeException ignored) {
-            // stile grafico opzionale: non deve mai bloccare la generazione
-        }
-    }
-
-    /**
-     * Forza Visual Paradigm a ricalcolare e mostrare la caption esterna di una shape (es. il nome sotto l'omino di
-     * {@code IActorUIModel}) o di un connettore ({@code <<include>>} / {@code <<extend>>}).
-     */
-    private static boolean refreshCaption(IDiagramElement element) {
-        if (element == null) {
-            return false;
-        }
-        boolean touched = false;
-        try {
-            if (invokePublic(element, "resetCaption") != InvocationResult.NOT_FOUND) {
-                touched = true;
-            }
+            invokePublic(element, "resetCaption");
             invokePublic(element, "setShowCaption", Boolean.TRUE);
             invokePublic(element, "setCaptionVisible", Boolean.TRUE);
             Object caption = invokeValue(element, "getCaptionUIModel");
             if (caption != null) {
                 invokePublic(caption, "setVisible", Boolean.TRUE);
                 invokePublic(caption, "fitSize");
-                touched = true;
             }
         } catch (RuntimeException ignored) { }
-        return touched;
     }
 
     private static void sendToBack(IDiagramUIModel diagram, IDiagramElement element) {
@@ -1025,68 +860,8 @@ public final class UseCaseDiagramGenerator {
         } catch (RuntimeException ignored) { }
     }
 
-    private static List<IUseCaseDiagramUIModel> findAllUseCaseDiagrams(IProject project) {
-        List<IUseCaseDiagramUIModel> out = new ArrayList<>();
-        Object arr = invokeValue(project, "toDiagramArray");
-        if (arr instanceof Object[]) {
-            for (Object d : (Object[]) arr) {
-                if (d instanceof IUseCaseDiagramUIModel) {
-                    out.add((IUseCaseDiagramUIModel) d);
-                }
-            }
-            return out;
-        }
-        Object it = invokeValue(project, "diagramIterator");
-        if (it instanceof Iterator) {
-            Iterator<?> iter = (Iterator<?>) it;
-            while (iter.hasNext()) {
-                Object d = iter.next();
-                if (d instanceof IUseCaseDiagramUIModel) {
-                    out.add((IUseCaseDiagramUIModel) d);
-                }
-            }
-        }
-        return out;
-    }
-
-    private static List<IDiagramElement> elementsOfDiagram(IDiagramUIModel diagram) {
-        List<IDiagramElement> out = new ArrayList<>();
-        Object arr = invokeValue(diagram, "toDiagramElementArray");
-        if (arr instanceof Object[]) {
-            for (Object e : (Object[]) arr) {
-                if (e instanceof IDiagramElement) {
-                    out.add((IDiagramElement) e);
-                }
-            }
-            return out;
-        }
-        Object it = invokeValue(diagram, "diagramElementIterator");
-        if (it instanceof Iterator) {
-            Iterator<?> iter = (Iterator<?>) it;
-            while (iter.hasNext()) {
-                Object e = iter.next();
-                if (e instanceof IDiagramElement) {
-                    out.add((IDiagramElement) e);
-                }
-            }
-        }
-        return out;
-    }
-
-    private static boolean isRelationConnector(IDiagramElement el) {
-        if (el instanceof IIncludeUIModel) {
-            return true;
-        }
-        Object model = invokeValue(el, "getModelElement");
-        return model instanceof IInclude || model instanceof IExtend;
-    }
-
     private enum InvocationResult { NOT_FOUND, INVOKED_NULL }
 
-    /**
-     * Invoca un metodo pubblico (risalendo le interfacce pubbliche: necessario perche' le implementazioni concrete di
-     * VP sono classi offuscate non pubbliche). Restituisce {@link InvocationResult#NOT_FOUND} se non trovato.
-     */
     private static Object invokePublic(Object target, String methodName, Object... args) {
         if (target == null) {
             return InvocationResult.NOT_FOUND;
@@ -1167,32 +942,5 @@ public final class UseCaseDiagramGenerator {
             return false;
         }
         return true;
-    }
-
-    private static Integer findPublicStaticInt(Class<?> start, String... fieldNames) {
-        Deque<Class<?>> queue = new ArrayDeque<>();
-        Set<Class<?>> seen = new HashSet<>();
-        queue.add(start);
-        while (!queue.isEmpty()) {
-            Class<?> k = queue.poll();
-            if (k == null || !seen.add(k)) {
-                continue;
-            }
-            if (Modifier.isPublic(k.getModifiers())) {
-                for (String name : fieldNames) {
-                    try {
-                        Field f = k.getField(name);
-                        if (Modifier.isStatic(f.getModifiers()) && f.getType() == int.class) {
-                            return f.getInt(null);
-                        }
-                    } catch (NoSuchFieldException | IllegalAccessException ignored) { }
-                }
-            }
-            if (k.getSuperclass() != null) {
-                queue.add(k.getSuperclass());
-            }
-            queue.addAll(Arrays.asList(k.getInterfaces()));
-        }
-        return null;
     }
 }
