@@ -12,7 +12,6 @@ import com.vp.plugin.DiagramManager;
 import com.vp.plugin.diagram.IDiagramElement;
 import com.vp.plugin.diagram.IShapeUIModel;
 import com.vp.plugin.diagram.IUseCaseDiagramUIModel;
-import com.vp.plugin.diagram.LayoutOption;
 import com.vp.plugin.diagram.connector.IIncludeUIModel;
 import com.vp.plugin.diagram.shape.IActorUIModel;
 import com.vp.plugin.diagram.shape.ISystemUIModel;
@@ -647,31 +646,13 @@ public final class UseCaseDiagramGenerator {
 
     private boolean runVpLayout(AreaState st) {
         try {
-            LayoutOption option;
-            if (layoutStyle == LayoutStyle.ORTHOGONAL) {
-                LayoutOption.Orthogonal orthogonal = diagramManager.createOrthogonalLayoutOption();
-                orthogonal.setLayoutGridSize(100);
-                option = orthogonal;
-            } else {
-                LayoutOption.Hierarchical hierarchical = diagramManager.createHierarchicalLayoutOption();
-                hierarchical.setMinimumConnectorDistance(10);
-                hierarchical.setMinimumLayerDistance(40);
-                hierarchical.setMinimumShapeDistance(40);
-                option = hierarchical;
-            }
-            diagramManager.openAndLayoutDiagram(st.diagram, option);
+            diagramManager.layout(st.diagram, layoutStyle == LayoutStyle.ORTHOGONAL
+                    ? DiagramManager.LAYOUT_ORTHOGONAL : DiagramManager.LAYOUT_HIERARCHIC);
             return true;
-        } catch (RuntimeException | LinkageError first) {
-            // Ripiego: layout a costante intera (api piu' vecchia o opzioni non disponibili in questa edizione).
-            try {
-                diagramManager.layout(st.diagram, layoutStyle == LayoutStyle.ORTHOGONAL
-                        ? DiagramManager.LAYOUT_ORTHOGONAL : DiagramManager.LAYOUT_HIERARCHIC);
-                return true;
-            } catch (RuntimeException | LinkageError second) {
-                logSink.accept("Auto-layout di '" + st.area.label() + "' non disponibile (" + first + "); "
-                        + "resta la griglia iniziale.");
-                return false;
-            }
+        } catch (RuntimeException | LinkageError e) {
+            logSink.accept("Auto-layout di '" + st.area.label() + "' non disponibile (" + e + "); "
+                    + "resta la griglia iniziale.");
+            return false;
         }
     }
 
