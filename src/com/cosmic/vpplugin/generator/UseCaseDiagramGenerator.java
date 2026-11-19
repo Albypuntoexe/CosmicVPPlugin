@@ -10,6 +10,7 @@ import com.cosmic.vpplugin.service.VpModelLookup;
 import com.vp.plugin.ApplicationManager;
 import com.vp.plugin.DiagramManager;
 import com.vp.plugin.diagram.IDiagramElement;
+import com.vp.plugin.diagram.IDiagramUIModel;
 import com.vp.plugin.diagram.IShapeUIModel;
 import com.vp.plugin.diagram.IUseCaseDiagramUIModel;
 import com.vp.plugin.diagram.connector.IIncludeUIModel;
@@ -28,7 +29,15 @@ import com.vp.plugin.model.ISystem;
 import com.vp.plugin.model.IUseCase;
 import com.vp.plugin.model.factory.IModelElementFactory;
 
+import java.awt.Color;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -41,7 +50,7 @@ import java.util.function.Consumer;
 /**
  * Traduce il modello COSMIC in Use Case Diagram reali di Visual Paradigm, UNO USE CASE ALLA VOLTA.
  *
- * <h3>Separazione MODEL / VIEW (v5.0, estesa agli attori nella v5.1)</h3>
+ * <h3>Separazione MODEL / VIEW (v5.0–v5.3)</h3>
  * In Visual Paradigm ogni cosa ha due facce:
  * <ul>
  *   <li><b>MODEL</b>: l'elemento nel database del progetto ({@code IUseCase}, {@code IActor}, {@code IInclude},
@@ -52,47 +61,27 @@ import java.util.function.Consumer;
  *       view", le altre "auxiliary view").</li>
  * </ul>
  *
- * <h3>Struttura generata per ogni {@link FunctionalArea}</h3>
- * <pre>
- *   Actors                                   IPackage GLOBALE (uno solo, alla radice): gli IActor del progetto
- *   PRE - Booking                            IPackage del sottosistema (se il documento ne ha uno)
- *    └─ F-PRE-04: Commissioned rooms ...     IPackage dell'area
- *        ├─ UCD - F-PRE-04: ...              il diagramma, dentro il package ({@code addSubDiagram})
- *        └─ F-PRE-04: Commissioned rooms     ISystem = System Boundary (nome = area)
- *            └─ Add commissioned room, ...   IUseCase dell'area (figli MODEL del System)
- * </pre>
+ * <h3>Correzioni permanenti v5.3 (rendering, stile UML, caption, auto-layout e Z-order)</h3>
  * <ul>
- *   <li><b>Use case</b>: un solo {@code IUseCase} per UC nel database. Se {@code UC-A} (area 1) include {@code UC-B}
- *       (area 2) per UC-B NON si chiama {@code createUseCase()}: si crea soltanto una nuova VIEW
- *       ({@code createDiagramElement(diagramArea1, ucBEsistente)}) FUORI dal boundary, poi la freccia.</li>
- *   <li><b>Attori (v5.1)</b>: un solo {@code IActor} per nome nell'intero progetto (confronto senza maiuscole e
- *       spazi multipli), nel package "Actors". Prima di crearlo si cerca per nome tra quelli di questa sessione e
- *       tra quelli gia' presenti nel database VP; se esiste si crea solo la vista {@code IActorUIModel} nel
- *       diagramma corrente. Gli attori restano FUORI dal boundary.</li>
- *   <li><b>System Boundary (v5.1)</b>: un {@code ISystem} per area, figlio del package dell'area, con il nome
- *       dell'area. La sua forma {@code ISystemUIModel} e' il CONTENITORE delle viste degli use case propri
- *       dell'area: {@code systemShape.addChild(useCaseShape)} (containment di UI) in aggiunta a
- *       {@code systemModel.addChild(useCaseModel)} (containment di model, come nell'esempio ufficiale VP).</li>
- *   <li><b>Auto-layout (v5.1)</b>: in {@link #finish()}, a diagramma completo, si lancia il layout di VP
- *       ({@code openAndLayoutDiagram} con {@code LayoutOption}, ripiego su {@code layout(diagram, LAYOUT_*)}) e poi
- *       si ricalcola il rettangolo del boundary sulle forme che contiene e si riportano fuori attori e viste
- *       ausiliarie se il layout li ha messi sopra. Prima del layout le forme sono comunque su una griglia ordinata:
- *       se il layout non e' disponibile il diagramma resta leggibile.</li>
+ *   <li><b>System Boundary trasparente/bianco</b>: rimuove il riempimento azzurro pieno di default di VP tramite
+ *       {@code IFillColor} (via reflection su interfacce pubbliche, zero dipendenze di versione) cosi' il boundary
+ *       ha lo stile UML standard e non puo' mai coprire visivamente uno use case figlio.</li>
+ *   <li><b>Caption di Attori e relazioni {@code <<include>>}/{@code <<extend>>}</b>: invoca {@code resetCaption()}
+ *       e abilita {@code ICaptionUIModel} sia alla creazione sia dopo il layout, cosi' i nomi degli attori sotto gli
+ *       omini e le etichette sulle frecce tratteggiate compaiono sempre.</li>
+ *   <li><b>Auto-layout reale senza distruzione post-layout</b>: apre esplicitamente ogni diagramma, invoca
+ *       {@code openAndLayoutDiagram} (via reflection, con ripiego su {@code layout(diagram, LAYOUT_*)}) e NON chiama
+ *       piu' {@code enforceBoundary} quando il layout di VP e' andato a buon fine (prima spostare il boundary dopo
+ *       il layout traslava i figli e sovrapponeva le linee).</li>
+ *   <li><b>Fix glitch dell'ultimo diagramma (es. F-SOG-07)</b>: il diagramma viene aperto solo dopo aver inserito
+ *       almeno il primo use case nel boundary, lo Z-order dei figli viene forzato in primo piano, e a fine
+ *       generazione il focus torna sul primo diagramma per forzare il flush grafico dell'ultimo tab.</li>
+ *   <li><b>Ripulitura istantanea di progetti gia' generati</b>: {@link #polishExistingDiagrams(Consumer)} applica
+ *       stile boundary, caption, Z-order e auto-layout a tutti gli Use Case Diagram gia' presenti nel progetto
+ *       aperto, senza dover rilanciare l'LLM.</li>
  * </ul>
- * Le viste ausiliarie non toccano {@code UseCase.vpElementId}/{@code diagramId} (restano quelli della master view): la
- * sincronizzazione con VP e i CFP "dello scope del diagramma" non vedono mai uno use case duplicato.
  *
- * <h3>Ciclo di vita incrementale (anti-freeze, invariato dalla v3.0)</h3>
- * <pre>
- *   generator.begin(projectName);                // una volta
- *   generator.appendUseCase(model, uc);          // dopo OGNI use case misurato (pochi elementi, ~ms)
- *   generator.finish();                          // una volta: relazioni residue + auto-layout di ogni diagramma
- * </pre>
  * TUTTI i metodi pubblici vanno invocati sul thread grafico (EDT): l'Open API di VP non e' thread-safe.
- *
- * ID tracking (Epic 4): {@code UseCase.vpElementId}/{@code diagramId}, {@code Actor.vpElementId} (l'id dell'unico
- * IActor, uguale in tutte le aree che lo usano), {@code FunctionalArea.vpPackageId}/{@code vpSystemId}/{@code diagramId}
- * sono valorizzati subito dopo la creazione.
  */
 public final class UseCaseDiagramGenerator {
 
@@ -109,7 +98,7 @@ public final class UseCaseDiagramGenerator {
     /** Nome del package globale degli attori. */
     public static final String ACTORS_PACKAGE_NAME = "Actors";
 
-    // ---- griglia iniziale (prima dell'auto-layout) ----
+    // ---- griglia iniziale (usata durante il disegno incrementale e come ripiego se il layout non e' disponibile) ----
     private static final int ACTOR_X = 40;
     private static final int ACTOR_W = 60;
     private static final int ACTOR_H = 90;
@@ -170,6 +159,7 @@ public final class UseCaseDiagramGenerator {
         final ISystem systemModel;
         final ISystemUIModel boundary;
         final IUseCaseDiagramUIModel diagram;
+        boolean opened;
         /** VIEW: ucId -> forma su QUESTO diagramma (master view se lo use case e' dell'area, auxiliary view altrimenti). */
         final Map<String, IUseCaseUIModel> useCaseViews = new HashMap<>();
         /** Le sole viste degli use case PROPRI dell'area: quelle contenute nel boundary. */
@@ -178,6 +168,8 @@ public final class UseCaseDiagramGenerator {
         final Map<String, IActorUIModel> actorViews = new LinkedHashMap<>();
         /** Viste ausiliarie di use case di altre aree (fuori dal boundary). */
         final List<IUseCaseUIModel> auxiliaryViews = new ArrayList<>();
+        /** Connettori <<include>> e <<extend>> su questo diagramma (per ripristinare le etichette dopo il layout). */
+        final List<IDiagramElement> relationConnectors = new ArrayList<>();
 
         AreaState(FunctionalArea area, IPackage pkg, ISystem systemModel, ISystemUIModel boundary,
                   IUseCaseDiagramUIModel diagram) {
@@ -285,6 +277,17 @@ public final class UseCaseDiagramGenerator {
             drawActorAssociation(st, model, actorId, ucModel, ucView);
         }
 
+        // Apriamo il diagramma SOLO dopo aver inserito il primo use case e i suoi attori: evita il glitch
+        // di rendering del boundary vuoto / figlio nascosto sul tab attivo.
+        if (!st.opened) {
+            st.opened = true;
+            diagramManager.openDiagram(st.diagram);
+            styleSystemBoundary(st.boundary);
+            for (IActorUIModel a : st.actorViews.values()) {
+                refreshCaption(a);
+            }
+        }
+
         // --- Relazioni (si disegnano quando esistono entrambi i model) ---
         for (String includedId : uc.includesIds) {
             pending.add(new PendingRelation(true, uc.id, includedId, null));
@@ -296,23 +299,38 @@ public final class UseCaseDiagramGenerator {
     }
 
     /**
-     * Chiude la sessione: segnala le relazioni mai risolte, lancia l'auto-layout di OGNI diagramma ormai completo e
-     * riassume cio' che e' stato creato.
+     * Chiude la sessione: segnala le relazioni mai risolte, applica auto-layout, stile UML del boundary,
+     * Z-order dei figli e caption su OGNI diagramma ormai completo, e riporta il focus sul primo diagramma.
      */
     public void finish() {
         flushPendingRelations(true);
         int laidOut = 0;
+        String lastLayoutMode = "";
+        IUseCaseDiagramUIModel firstDiagram = null;
         for (AreaState st : areas.values()) {
-            if (layoutDiagram(st)) {
-                laidOut++;
+            if (firstDiagram == null) {
+                firstDiagram = st.diagram;
             }
+            String mode = layoutAndPolishDiagram(st);
+            if (mode != null) {
+                laidOut++;
+                lastLayoutMode = mode;
+            }
+        }
+        // Riporta il focus sul primo diagramma: forza il flush grafico dell'ultimo tab (es. F-SOG-07)
+        // e lascia l'utente sulla prima area funzionale del progetto.
+        if (firstDiagram != null && areas.size() > 1) {
+            try {
+                diagramManager.openDiagram(firstDiagram);
+            } catch (RuntimeException ignored) { }
         }
         logSink.accept("Generati " + areas.size() + " package/diagrammi con System Boundary (uno per area funzionale), "
                 + useCaseElements.size() + " use case nel modello VP; "
                 + auxiliaryViews + " viste ausiliarie per gli use case referenziati da altre aree. "
                 + "Attori: " + actorsCreated + " creati nel package '" + ACTORS_PACKAGE_NAME + "', "
                 + actorsReused + " riusati dal database, " + actorAuxiliaryViews + " viste ausiliarie aggiuntive. "
-                + "Auto-layout: " + laidOut + "/" + areas.size() + " diagrammi (" + layoutStyle + ").");
+                + "Auto-layout: " + laidOut + "/" + areas.size() + " diagrammi (" + layoutStyle
+                + (lastLayoutMode.isEmpty() ? "" : ", " + lastLayoutMode) + ").");
         pending.clear();
     }
 
@@ -326,10 +344,99 @@ public final class UseCaseDiagramGenerator {
     }
 
     // ------------------------------------------------------------------
+    // Ripulitura istantanea di tutti gli Use Case Diagram GIA' presenti su VP
+    // ------------------------------------------------------------------
+
+    /**
+     * v5.3 - Applica stile trasparente/bianco ai System Boundary, ripristina le caption di Attori e connettori
+     * {@code <<include>>}/{@code <<extend>>}, porta gli Use Case in primo piano e rilancia l'auto-layout su TUTTI
+     * gli Use Case Diagram del progetto attualmente aperto in Visual Paradigm (senza toccare il modello ne' l'LLM).
+     * Va invocato sull'EDT.
+     */
+    public static int polishExistingDiagrams(LayoutStyle style, Consumer<String> logSink) {
+        Consumer<String> log = (logSink != null) ? logSink : (m -> { });
+        LayoutStyle effectiveStyle = (style != null) ? style : LayoutStyle.HIERARCHICAL;
+        IProject project = ApplicationManager.instance().getProjectManager().getProject();
+        if (project == null) {
+            log.accept("Nessun progetto aperto in Visual Paradigm.");
+            return 0;
+        }
+        DiagramManager dm = ApplicationManager.instance().getDiagramManager();
+        List<IUseCaseDiagramUIModel> diagrams = findAllUseCaseDiagrams(project);
+        if (diagrams.isEmpty()) {
+            log.accept("Nessun Use Case Diagram trovato nel progetto aperto.");
+            return 0;
+        }
+
+        int polished = 0;
+        int boundariesStyled = 0;
+        int captionsFixed = 0;
+        IUseCaseDiagramUIModel first = diagrams.get(0);
+
+        for (IUseCaseDiagramUIModel d : diagrams) {
+            try {
+                dm.openDiagram(d);
+            } catch (RuntimeException ignored) { }
+
+            List<IDiagramElement> elements = elementsOfDiagram(d);
+            List<ISystemUIModel> systems = new ArrayList<>();
+            List<IUseCaseUIModel> useCases = new ArrayList<>();
+            List<IActorUIModel> actors = new ArrayList<>();
+            List<IDiagramElement> relConnectors = new ArrayList<>();
+
+            for (IDiagramElement el : elements) {
+                if (el instanceof ISystemUIModel) {
+                    systems.add((ISystemUIModel) el);
+                } else if (el instanceof IUseCaseUIModel) {
+                    useCases.add((IUseCaseUIModel) el);
+                } else if (el instanceof IActorUIModel) {
+                    actors.add((IActorUIModel) el);
+                } else if (isRelationConnector(el)) {
+                    relConnectors.add(el);
+                }
+            }
+
+            if (effectiveStyle != LayoutStyle.NONE) {
+                runVpLayoutOn(dm, d, effectiveStyle, d.getName(), log);
+            }
+
+            for (ISystemUIModel sys : systems) {
+                styleSystemBoundary(sys);
+                sendToBack(d, sys);
+                boundariesStyled++;
+            }
+            for (IUseCaseUIModel uc : useCases) {
+                bringToFront(d, uc);
+            }
+            for (IActorUIModel actor : actors) {
+                if (refreshCaption(actor)) {
+                    captionsFixed++;
+                }
+            }
+            for (IDiagramElement conn : relConnectors) {
+                if (refreshCaption(conn)) {
+                    captionsFixed++;
+                }
+            }
+            polished++;
+        }
+
+        if (diagrams.size() > 1) {
+            try {
+                dm.openDiagram(first);
+            } catch (RuntimeException ignored) { }
+        }
+        log.accept("Stile e layout applicati a " + polished + " diagrammi (" + boundariesStyled
+                + " System Boundary resi trasparenti/bianchi, " + captionsFixed
+                + " etichette attori/relazioni ripristinate).");
+        return polished;
+    }
+
+    // ------------------------------------------------------------------
     // Package, boundary e diagramma dell'area
     // ------------------------------------------------------------------
 
-    /** Package + System Boundary + diagramma dell'area, creati al primo bisogno (vedi la struttura nel javadoc della classe). */
+    /** Package + System Boundary + diagramma dell'area, creati al primo bisogno. */
     private AreaState ensureArea(FunctionalArea area) {
         AreaState st = areas.get(area.id);
         if (st != null) {
@@ -357,13 +464,13 @@ public final class UseCaseDiagramGenerator {
         pkg.addSubDiagram(diagram);                 // il diagramma sta FISICAMENTE dentro il package dell'area
         area.diagramId = diagram.getId();
 
-        // VIEW del System Boundary: creata subito, cosi' sta sotto tutte le altre forme.
+        // VIEW del System Boundary: creata subito e stilata trasparente/bianca (stile UML pulito).
         ISystemUIModel boundary = (ISystemUIModel) diagramManager.createDiagramElement(diagram, systemModel);
         boundary.setBounds(BOUNDARY_X, BOUNDARY_Y, boundaryWidth(1), boundaryHeight(1));
+        styleSystemBoundary(boundary);
 
         st = new AreaState(area, pkg, systemModel, boundary, diagram);
         areas.put(area.id, st);
-        diagramManager.openDiagram(diagram);        // visibile subito: l'utente lo vede crescere
         return st;
     }
 
@@ -406,7 +513,7 @@ public final class UseCaseDiagramGenerator {
         return BOUNDARY_X + boundaryWidth(UC_COLS) + OUTSIDE_GAP;
     }
 
-    /** Ridimensiona il boundary sulla griglia degli use case propri (cresce man mano che se ne aggiungono). */
+    /** Ridimensiona il boundary sulla griglia degli use case propri (mantiene l'origine fissa per non spostare i figli). */
     private void fitBoundaryToGrid(AreaState st) {
         int owned = Math.max(1, st.ownedViews.size());
         int cols = Math.min(owned, UC_COLS);
@@ -435,7 +542,8 @@ public final class UseCaseDiagramGenerator {
         if (actorView == null) {
             actorView = (IActorUIModel) diagramManager.createDiagramElement(st.diagram, actorModel);
             actorView.setBounds(ACTOR_X, BOUNDARY_Y + BOUNDARY_TITLE + st.actorViews.size() * ACTOR_Y_STEP, ACTOR_W, ACTOR_H);
-            st.actorViews.put(key, actorView);               // fuori dal boundary: NON si aggiunge come figlio
+            refreshCaption(actorView);                      // fondamentale: rende visibile il nome sotto l'omino
+            st.actorViews.put(key, actorView);              // fuori dal boundary: NON si aggiunge come figlio
             if (!mastersOfActors.add(key)) {
                 actorAuxiliaryViews++;
             }
@@ -466,9 +574,7 @@ public final class UseCaseDiagramGenerator {
 
     /**
      * Una volta per sessione: censisce gli {@code IActor} gia' presenti nel database VP (generazioni precedenti,
-     * attori disegnati a mano) per nome, preferendo quelli gia' nel package "Actors". Se l'API di enumerazione non e'
-     * disponibile la mappa resta vuota e gli attori si creano (al piu' un duplicato rispetto a prima, mai piu' di uno
-     * per nome nella sessione).
+     * attori disegnati a mano) per nome, preferendo quelli gia' nel package "Actors".
      */
     private void scanExistingActors() {
         if (existingActorsScanned) {
@@ -597,6 +703,11 @@ public final class UseCaseDiagramGenerator {
         includeModel.setTo(includedModel);
         Object connector = diagramManager.createConnector(
                 st.diagram, includeModel, (IDiagramElement) baseView, (IDiagramElement) includedView, null);
+        if (connector instanceof IDiagramElement) {
+            IDiagramElement connEl = (IDiagramElement) connector;
+            st.relationConnectors.add(connEl);
+            refreshCaption(connEl);
+        }
         if (!(connector instanceof IIncludeUIModel)) {
             logSink.accept("<<include>> " + rel.fromUcId + " -> " + rel.toUcId + ": il connettore creato non e' un IIncludeUIModel.");
         }
@@ -617,69 +728,207 @@ public final class UseCaseDiagramGenerator {
             extensionPoint.setName(rel.extensionPoint);
             extendModel.setExtensionPoint(extensionPoint);
         }
-        diagramManager.createConnector(
+        Object connector = diagramManager.createConnector(
                 st.diagram, extendModel, (IDiagramElement) extensionView, (IDiagramElement) baseView, null);
+        if (connector instanceof IDiagramElement) {
+            IDiagramElement connEl = (IDiagramElement) connector;
+            st.relationConnectors.add(connEl);
+            refreshCaption(connEl);
+        }
     }
 
     // ------------------------------------------------------------------
-    // Auto-layout di fine generazione
+    // Auto-layout, stile UML, Z-order e caption di fine generazione
     // ------------------------------------------------------------------
 
     /**
-     * Lancia l'auto-layout di VP sul diagramma completo e poi ne sistema il contorno. Ogni passo e' protetto: se
-     * l'edizione di VP non espone il layout (o lancia), il diagramma resta sulla griglia iniziale, gia' ordinata.
+     * Apre il diagramma, esegue l'auto-layout di VP (senza sovrascrivere il boundary se il layout riesce!),
+     * applica lo stile trasparente/bianco al System Boundary, garantisce lo Z-order dei figli e rigenera le
+     * caption di attori e relazioni.
      *
-     * @return true se un layout automatico e' stato eseguito
+     * @return nome del meccanismo di layout eseguito, oppure null se nessun layout automatico e' stato eseguito
      */
-    private boolean layoutDiagram(AreaState st) {
-        boolean done = false;
-        if (layoutStyle != LayoutStyle.NONE) {
-            done = runVpLayout(st);
-        }
+    private String layoutAndPolishDiagram(AreaState st) {
         try {
-            enforceBoundary(st);
-        } catch (RuntimeException e) {
-            logSink.accept("Boundary di '" + st.area.label() + "': riposizionamento non riuscito (" + e + ").");
+            diagramManager.openDiagram(st.diagram);
+        } catch (RuntimeException ignored) { }
+
+        String mode = null;
+        if (layoutStyle != LayoutStyle.NONE) {
+            mode = runVpLayoutOn(diagramManager, st.diagram, layoutStyle, st.area.label(), logSink);
         }
-        return done;
+
+        // CRITICO (v5.3): se il layout di VP e' andato a buon fine, VP ha gia' dimensionato il contenitore
+        // ISystemUIModel attorno ai figli e instradato i connettori. Chiamare boundary.setBounds() qui
+        // sposterebbe i figli e romperebbe il layout. enforceBoundary si usa SOLO come ripiego se il layout
+        // non e' disponibile oppure se qualche forma e' rimasta fisicamente sovrapposta/fuori.
+        if (mode == null || hasBrokenGeometry(st)) {
+            try {
+                enforceBoundary(st);
+            } catch (RuntimeException e) {
+                logSink.accept("Boundary di '" + st.area.label() + "': riposizionamento non riuscito (" + e + ").");
+            }
+        }
+
+        // Stile UML del boundary + Z-order esplicito (impossibile coprire gli ovali)
+        styleSystemBoundary(st.boundary);
+        sendToBack(st.diagram, st.boundary);
+        for (IUseCaseUIModel ucView : st.ownedViews) {
+            bringToFront(st.diagram, ucView);
+        }
+
+        // Ripristina le etichette di attori e frecce <<include>>/<<extend>> dopo il posizionamento finale
+        for (IActorUIModel actorView : st.actorViews.values()) {
+            refreshCaption(actorView);
+        }
+        for (IDiagramElement conn : st.relationConnectors) {
+            refreshCaption(conn);
+        }
+        return mode;
     }
 
-    private boolean runVpLayout(AreaState st) {
+    /**
+     * Lancia l'auto-layout di Visual Paradigm nel modo piu' compatibile con l'edizione corrente (zero dipendenze
+     * a compile-time da classi interne di {@code LayoutOption}):
+     * <ol>
+     *   <li>{@code openAndLayoutDiagram(diagram, option)} creando l'opzione via reflection
+     *       ({@code createHierarchicLayoutOption} / {@code createHierarchicalLayoutOption} /
+     *       {@code createOrthogonalLayoutOption});</li>
+     *   <li>{@code openAndLayoutDiagram(diagram)} (layout di default di VP per il diagramma);</li>
+     *   <li>{@code layout(diagram, LAYOUT_HIERARCHIC / LAYOUT_ORTHOGONAL)} (API storica compile-verified).</li>
+     * </ol>
+     */
+    private static String runVpLayoutOn(DiagramManager dm, IUseCaseDiagramUIModel diagram,
+                                        LayoutStyle style, String label, Consumer<String> log) {
+        // 1) openAndLayoutDiagram(diagram, option) via reflection
         try {
-            diagramManager.layout(st.diagram, layoutStyle == LayoutStyle.ORTHOGONAL
+            Object option = createLayoutOptionReflective(dm, style);
+            if (option != null && invokePublic(dm, "openAndLayoutDiagram", diagram, option) != InvocationResult.NOT_FOUND) {
+                return "openAndLayoutDiagram(option)";
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            // prosegue con i ripieghi
+        }
+
+        // 2) openAndLayoutDiagram(diagram) a 1 parametro (equivalente diretto al bottone Auto-Layout di VP)
+        try {
+            if (invokePublic(dm, "openAndLayoutDiagram", diagram) != InvocationResult.NOT_FOUND) {
+                return "openAndLayoutDiagram";
+            }
+        } catch (RuntimeException | LinkageError ignored) {
+            // prosegue con il ripiego base
+        }
+
+        // 3) layout(diagram, int) - garantito a compile-time su tutte le edizioni VP
+        try {
+            dm.layout(diagram, style == LayoutStyle.ORTHOGONAL
                     ? DiagramManager.LAYOUT_ORTHOGONAL : DiagramManager.LAYOUT_HIERARCHIC);
-            return true;
+            return "layout(int)";
         } catch (RuntimeException | LinkageError e) {
-            logSink.accept("Auto-layout di '" + st.area.label() + "' non disponibile (" + e + "); "
-                    + "resta la griglia iniziale.");
+            log.accept("Auto-layout di '" + label + "' non disponibile (" + e + "); resta la griglia iniziale.");
+            return null;
+        }
+    }
+
+    private static Object createLayoutOptionReflective(DiagramManager dm, LayoutStyle style) {
+        if (style == LayoutStyle.ORTHOGONAL) {
+            Object opt = invokeValue(dm, "createOrthogonalLayoutOption");
+            if (opt != null) {
+                invokePublic(opt, "setLayoutGridSize", 80);
+            }
+            return opt;
+        }
+        // VP usa "createHierarchicalLayoutOption" in alcune versioni e "createHierarchicLayoutOption" in altre.
+        Object opt = invokeValue(dm, "createHierarchicalLayoutOption");
+        if (opt == null) {
+            opt = invokeValue(dm, "createHierarchicLayoutOption");
+        }
+        if (opt != null) {
+            invokePublic(opt, "setMinimumConnectorDistance", 20);
+            invokePublic(opt, "setMinimumLayerDistance", 50);
+            invokePublic(opt, "setMinimumShapeDistance", 40);
+        }
+        return opt;
+    }
+
+    /**
+     * Verifica se, dopo il layout, uno use case proprio e' finito fuori dal boundary oppure un attore/vista
+     * ausiliaria e' finito sovrapposto al boundary (es. motore di layout ostile o non container-aware).
+     */
+    private static boolean hasBrokenGeometry(AreaState st) {
+        if (st.ownedViews.isEmpty()) {
             return false;
         }
+        int bx = st.boundary.getX();
+        int by = st.boundary.getY();
+        int bw = st.boundary.getWidth();
+        int bh = st.boundary.getHeight();
+        if (bw <= 0 || bh <= 0) {
+            return true;
+        }
+        for (IUseCaseUIModel v : st.ownedViews) {
+            if (v.getX() < bx || v.getY() < by
+                    || v.getX() + v.getWidth() > bx + bw
+                    || v.getY() + v.getHeight() > by + bh) {
+                return true;
+            }
+        }
+        for (IActorUIModel a : st.actorViews.values()) {
+            if (overlaps(a, bx, by, bw, bh)) {
+                return true;
+            }
+        }
+        for (IUseCaseUIModel a : st.auxiliaryViews) {
+            if (overlaps(a, bx, by, bw, bh)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
-     * Dopo il layout: il rettangolo del boundary deve racchiudere ESATTAMENTE le viste degli use case propri
-     * (con margine e fascia del titolo), e attori e viste ausiliarie devono stare fuori. Se il motore di layout ha
-     * gia' fatto tutto bene questo passo non cambia nulla di visibile.
+     * Ripiego di sicurezza quando il layout automatico non e' disponibile o ha lasciato forme sovrapposte:
+     * ricalcola il boundary sugli use case propri, tenendo fermi gli ovali figli anche se VP sposta i figli
+     * insieme al contenitore, e porta fuori attori e viste ausiliarie sovrapposte.
      */
     private void enforceBoundary(AreaState st) {
         if (st.ownedViews.isEmpty()) {
             return;
         }
+        int n = st.ownedViews.size();
+        int[] xs = new int[n];
+        int[] ys = new int[n];
+        int[] ws = new int[n];
+        int[] hs = new int[n];
         int minX = Integer.MAX_VALUE;
         int minY = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE;
         int maxY = Integer.MIN_VALUE;
-        for (IUseCaseUIModel v : st.ownedViews) {
-            minX = Math.min(minX, v.getX());
-            minY = Math.min(minY, v.getY());
-            maxX = Math.max(maxX, v.getX() + v.getWidth());
-            maxY = Math.max(maxY, v.getY() + v.getHeight());
+        for (int i = 0; i < n; i++) {
+            IUseCaseUIModel v = st.ownedViews.get(i);
+            xs[i] = v.getX();
+            ys[i] = v.getY();
+            ws[i] = v.getWidth();
+            hs[i] = v.getHeight();
+            minX = Math.min(minX, xs[i]);
+            minY = Math.min(minY, ys[i]);
+            maxX = Math.max(maxX, xs[i] + ws[i]);
+            maxY = Math.max(maxY, ys[i] + hs[i]);
         }
         int bx = minX - BOUNDARY_PAD;
         int by = minY - BOUNDARY_TITLE;
         int bw = (maxX - minX) + 2 * BOUNDARY_PAD;
         int bh = (maxY - minY) + BOUNDARY_TITLE + BOUNDARY_PAD;
         st.boundary.setBounds(bx, by, bw, bh);
+
+        // In VP spostare un contenitore puo' traslare i suoi figli del delta (bx - oldBx):
+        // ripristiniamo le coordinate assolute desiderate dei figli cosi' restano esattamente dentro (bx, by, bw, bh).
+        for (int i = 0; i < n; i++) {
+            IUseCaseUIModel v = st.ownedViews.get(i);
+            if (v.getX() != xs[i] || v.getY() != ys[i]) {
+                v.setBounds(xs[i], ys[i], ws[i], hs[i]);
+            }
+        }
 
         // Attori: se toccano il boundary vanno a sinistra; viste ausiliarie: a destra.
         for (IActorUIModel a : st.actorViews.values()) {
@@ -697,5 +946,253 @@ public final class UseCaseDiagramGenerator {
     private static boolean overlaps(IDiagramElement e, int x, int y, int w, int h) {
         return e.getX() < x + w && e.getX() + e.getWidth() > x
                 && e.getY() < y + h && e.getY() + e.getHeight() > y;
+    }
+
+    // ------------------------------------------------------------------
+    // Helper di stile UML, caption, Z-order e reflection sicura su VP
+    // ------------------------------------------------------------------
+
+    /**
+     * Imposta il System Boundary in stile UML pulito (sfondo trasparente/bianco invece dell'azzurro pieno di default
+     * di VP): in questo modo gli ovali degli use case risaltano chiaramente e il rettangolo non puo' mai coprirli.
+     */
+    private static void styleSystemBoundary(ISystemUIModel boundary) {
+        if (boundary == null) {
+            return;
+        }
+        try {
+            Object fill = invokeValue(boundary, "getFillColor");
+            if (fill != null) {
+                invokePublic(fill, "setColor1", Color.WHITE);
+                invokePublic(fill, "setColor2", Color.WHITE);
+                Integer typeNone = findPublicStaticInt(fill.getClass(), "TYPE_NONE", "STYLE_NONE");
+                if (typeNone != null) {
+                    invokePublic(fill, "setType", typeNone);
+                } else {
+                    Integer typeSolid = findPublicStaticInt(fill.getClass(), "TYPE_SOLID", "STYLE_SOLID");
+                    if (typeSolid != null) {
+                        invokePublic(fill, "setType", typeSolid);
+                    }
+                    invokePublic(fill, "setTransparency", 100);
+                }
+            } else {
+                invokePublic(boundary, "setBackground", Color.WHITE);
+            }
+            invokePublic(boundary, "setOpaque", Boolean.FALSE);
+        } catch (RuntimeException ignored) {
+            // stile grafico opzionale: non deve mai bloccare la generazione
+        }
+    }
+
+    /**
+     * Forza Visual Paradigm a ricalcolare e mostrare la caption esterna di una shape (es. il nome sotto l'omino di
+     * {@code IActorUIModel}) o di un connettore ({@code <<include>>} / {@code <<extend>>}).
+     */
+    private static boolean refreshCaption(IDiagramElement element) {
+        if (element == null) {
+            return false;
+        }
+        boolean touched = false;
+        try {
+            if (invokePublic(element, "resetCaption") != InvocationResult.NOT_FOUND) {
+                touched = true;
+            }
+            invokePublic(element, "setShowCaption", Boolean.TRUE);
+            invokePublic(element, "setCaptionVisible", Boolean.TRUE);
+            Object caption = invokeValue(element, "getCaptionUIModel");
+            if (caption != null) {
+                invokePublic(caption, "setVisible", Boolean.TRUE);
+                invokePublic(caption, "fitSize");
+                touched = true;
+            }
+        } catch (RuntimeException ignored) { }
+        return touched;
+    }
+
+    private static void sendToBack(IDiagramUIModel diagram, IDiagramElement element) {
+        try {
+            if (invokePublic(diagram, "moveToBack", element) == InvocationResult.NOT_FOUND) {
+                invokePublic(element, "toBack");
+            }
+        } catch (RuntimeException ignored) { }
+    }
+
+    private static void bringToFront(IDiagramUIModel diagram, IDiagramElement element) {
+        try {
+            if (invokePublic(diagram, "moveToFront", element) == InvocationResult.NOT_FOUND) {
+                invokePublic(element, "toFront");
+            }
+        } catch (RuntimeException ignored) { }
+    }
+
+    private static List<IUseCaseDiagramUIModel> findAllUseCaseDiagrams(IProject project) {
+        List<IUseCaseDiagramUIModel> out = new ArrayList<>();
+        Object arr = invokeValue(project, "toDiagramArray");
+        if (arr instanceof Object[]) {
+            for (Object d : (Object[]) arr) {
+                if (d instanceof IUseCaseDiagramUIModel) {
+                    out.add((IUseCaseDiagramUIModel) d);
+                }
+            }
+            return out;
+        }
+        Object it = invokeValue(project, "diagramIterator");
+        if (it instanceof Iterator) {
+            Iterator<?> iter = (Iterator<?>) it;
+            while (iter.hasNext()) {
+                Object d = iter.next();
+                if (d instanceof IUseCaseDiagramUIModel) {
+                    out.add((IUseCaseDiagramUIModel) d);
+                }
+            }
+        }
+        return out;
+    }
+
+    private static List<IDiagramElement> elementsOfDiagram(IDiagramUIModel diagram) {
+        List<IDiagramElement> out = new ArrayList<>();
+        Object arr = invokeValue(diagram, "toDiagramElementArray");
+        if (arr instanceof Object[]) {
+            for (Object e : (Object[]) arr) {
+                if (e instanceof IDiagramElement) {
+                    out.add((IDiagramElement) e);
+                }
+            }
+            return out;
+        }
+        Object it = invokeValue(diagram, "diagramElementIterator");
+        if (it instanceof Iterator) {
+            Iterator<?> iter = (Iterator<?>) it;
+            while (iter.hasNext()) {
+                Object e = iter.next();
+                if (e instanceof IDiagramElement) {
+                    out.add((IDiagramElement) e);
+                }
+            }
+        }
+        return out;
+    }
+
+    private static boolean isRelationConnector(IDiagramElement el) {
+        if (el instanceof IIncludeUIModel) {
+            return true;
+        }
+        Object model = invokeValue(el, "getModelElement");
+        return model instanceof IInclude || model instanceof IExtend;
+    }
+
+    private enum InvocationResult { NOT_FOUND, INVOKED_NULL }
+
+    /**
+     * Invoca un metodo pubblico (risalendo le interfacce pubbliche: necessario perche' le implementazioni concrete di
+     * VP sono classi offuscate non pubbliche). Restituisce {@link InvocationResult#NOT_FOUND} se non trovato.
+     */
+    private static Object invokePublic(Object target, String methodName, Object... args) {
+        if (target == null) {
+            return InvocationResult.NOT_FOUND;
+        }
+        Method m = findCompatiblePublicMethod(target.getClass(), methodName, args);
+        if (m == null) {
+            return InvocationResult.NOT_FOUND;
+        }
+        try {
+            Object res = m.invoke(target, args);
+            return res == null ? InvocationResult.INVOKED_NULL : res;
+        } catch (IllegalAccessException | InvocationTargetException e) {
+            Throwable cause = (e instanceof InvocationTargetException && e.getCause() != null) ? e.getCause() : e;
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            if (cause instanceof LinkageError) {
+                throw (LinkageError) cause;
+            }
+            return InvocationResult.NOT_FOUND;
+        }
+    }
+
+    private static Object invokeValue(Object target, String methodName, Object... args) {
+        Object res = invokePublic(target, methodName, args);
+        return (res instanceof InvocationResult) ? null : res;
+    }
+
+    private static Method findCompatiblePublicMethod(Class<?> start, String name, Object[] args) {
+        Deque<Class<?>> queue = new ArrayDeque<>();
+        Set<Class<?>> seen = new HashSet<>();
+        queue.add(start);
+        while (!queue.isEmpty()) {
+            Class<?> k = queue.poll();
+            if (k == null || !seen.add(k)) {
+                continue;
+            }
+            if (Modifier.isPublic(k.getModifiers())) {
+                for (Method m : k.getMethods()) {
+                    if (!m.getName().equals(name) || m.getParameterCount() != args.length) {
+                        continue;
+                    }
+                    if (!Modifier.isPublic(m.getDeclaringClass().getModifiers())) {
+                        continue;
+                    }
+                    if (paramsMatch(m.getParameterTypes(), args)) {
+                        return m;
+                    }
+                }
+            }
+            if (k.getSuperclass() != null) {
+                queue.add(k.getSuperclass());
+            }
+            queue.addAll(Arrays.asList(k.getInterfaces()));
+        }
+        return null;
+    }
+
+    private static boolean paramsMatch(Class<?>[] paramTypes, Object[] args) {
+        for (int i = 0; i < paramTypes.length; i++) {
+            Class<?> p = paramTypes[i];
+            Object a = args[i];
+            if (a == null) {
+                if (p.isPrimitive()) {
+                    return false;
+                }
+                continue;
+            }
+            Class<?> ac = a.getClass();
+            if (p.isAssignableFrom(ac)) {
+                continue;
+            }
+            if (p == int.class && ac == Integer.class) continue;
+            if (p == boolean.class && ac == Boolean.class) continue;
+            if (p == double.class && ac == Double.class) continue;
+            if (p == float.class && ac == Float.class) continue;
+            if (p == long.class && ac == Long.class) continue;
+            return false;
+        }
+        return true;
+    }
+
+    private static Integer findPublicStaticInt(Class<?> start, String... fieldNames) {
+        Deque<Class<?>> queue = new ArrayDeque<>();
+        Set<Class<?>> seen = new HashSet<>();
+        queue.add(start);
+        while (!queue.isEmpty()) {
+            Class<?> k = queue.poll();
+            if (k == null || !seen.add(k)) {
+                continue;
+            }
+            if (Modifier.isPublic(k.getModifiers())) {
+                for (String name : fieldNames) {
+                    try {
+                        Field f = k.getField(name);
+                        if (Modifier.isStatic(f.getModifiers()) && f.getType() == int.class) {
+                            return f.getInt(null);
+                        }
+                    } catch (NoSuchFieldException | IllegalAccessException ignored) { }
+                }
+            }
+            if (k.getSuperclass() != null) {
+                queue.add(k.getSuperclass());
+            }
+            queue.addAll(Arrays.asList(k.getInterfaces()));
+        }
+        return null;
     }
 }

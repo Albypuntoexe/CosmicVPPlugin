@@ -8,6 +8,7 @@ import com.cosmic.vpplugin.model.CosmicJsonModel;
 import com.cosmic.vpplugin.model.CosmicJsonModel.FunctionalProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.SubProcess;
 import com.cosmic.vpplugin.model.CosmicJsonModel.UseCase;
+import com.cosmic.vpplugin.generator.UseCaseDiagramGenerator;
 import com.cosmic.vpplugin.service.CosmicAiService;
 import com.cosmic.vpplugin.service.CosmicAiService.ManualField;
 import com.cosmic.vpplugin.service.CosmicAnalysisListener;
@@ -139,6 +140,7 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
     // --- v4.0: rimisura da VP (stesso comando, due punti di accesso)
     private final JButton remeasureButton = new JButton("Rimisura Progetto da VP");
     private final JButton remeasureButton2 = new JButton("Rimisura Progetto da VP");
+    private final JButton polishDiagramsButton = new JButton("Sistema Layout/Stile VP");
 
     // --- v4.0: impostazioni LLM
     private final JTextField endpointField = new JTextField();
@@ -222,6 +224,9 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         buttons.add(remeasureButton);
         buttons.add(cancelButton);
         buttons.add(exportCsvButton);
+        polishDiagramsButton.setToolTipText("Rende trasparenti i System Boundary, ripristina i nomi degli attori/<<include>> e rilancia l'auto-layout su tutti i diagrammi VP senza richiamare l'LLM");
+        polishDiagramsButton.addActionListener(e -> onPolishDiagramsClicked());
+        buttons.add(polishDiagramsButton);
         remeasureButton.setToolTipText("Rilegge nome e Specification di ogni use case dal canvas di Visual Paradigm e li rimisura");
         remeasureButton.addActionListener(e -> onRemeasureClicked());
 
@@ -404,7 +409,12 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
     }
 
     /** v4.0 - "Rimisura Progetto da VP": chiede conferma e la modalita', poi delega al Service. */
-    private void onRemeasureClicked() {
+    private void onPolishDiagramsClicked() {
+        if (busy) return;
+        UseCaseDiagramGenerator.polishExistingDiagrams(UseCaseDiagramGenerator.LayoutStyle.HIERARCHICAL, this::onLog);
+    }
+
+        private void onRemeasureClicked() {
         if (busy) return;
         Object[] options = {"Solo nuovi/modificati", "Tutti gli use case", "Annulla"};
         String msg = "Verranno letti dal canvas di Visual Paradigm il NOME e il testo del campo Specification di ogni use case,\n"
@@ -584,6 +594,7 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         chooseFileButton.setEnabled(!isBusy);
         remeasureButton.setEnabled(!isBusy);
         remeasureButton2.setEnabled(!isBusy);
+        polishDiagramsButton.setEnabled(!isBusy);
         cancelButton.setEnabled(isBusy);
         if (isBusy) exportCsvButton.setEnabled(false);
         editTableModel.setEditable(!isBusy);        // niente correzioni manuali mentre la pipeline scrive sul modello
@@ -667,9 +678,12 @@ public final class CosmicAnalyzerDialogHandler implements IDialogHandler, Cosmic
         if (!busy) {
             exportCsvButton.setEnabled(model.hasUseCases());
             progressBar.setIndeterminate(false);
-            if (progressBar.getMaximum() > 0 && progressBar.getValue() >= progressBar.getMaximum()) {
-                progressLabel.setText("Analisi terminata.");
+            if (progressBar.getMaximum() <= 0 || progressBar.getValue() < progressBar.getMaximum()) {
+                progressBar.setMaximum(1);
+                progressBar.setValue(1);
+                progressBar.setString("Completato");
             }
+            progressLabel.setText("Operazione completata.");
         }
     }
 
